@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "evidence": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "id": {
+      "type": "string"
+    },
+    "impact": {
+      "type": "string"
+    },
+    "owner": {
+      "type": "string"
+    },
+    "required_fix": {
+      "type": "string"
+    },
+    "severity": {
+      "enum": [
+        "CRITICAL",
+        "HIGH",
+        "MEDIUM",
+        "LOW"
+      ]
+    },
+    "status": {
+      "enum": [
+        "OPEN",
+        "FIXED_PENDING_REVIEW",
+        "CLOSED",
+        "ACCEPTED",
+        "DEFERRED"
+      ]
+    },
+    "title": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "severity",
+    "title",
+    "evidence",
+    "impact",
+    "required_fix",
+    "owner",
+    "status"
+  ],
+  "type": "object"
+}

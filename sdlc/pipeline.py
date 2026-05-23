@@ -1,0 +1,379 @@
+"""Secure SDLC pipeline definitions.
+
+The product itself uses this same pipeline to plan and validate work.  The
+pipeline is intentionally more rigorous than the original 12-step sketch: it
+adds governance, supply-chain, privacy, observability, provenance, and claim
+control gates for high-assurance AI-assisted software delivery.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field, asdict
+from typing import Any
+
+
+@dataclass(frozen=True)
+class GateDefinition:
+    """A deterministic gate definition used by the orchestrator."""
+
+    id: str
+    order: int
+    title: str
+    owner: str
+    purpose: str
+    required_artifacts: list[str] = field(default_factory=list)
+    default_mode: str = "READ_ONLY"
+    conditional_on: str | None = None
+    auto_skip_when_false: bool = True
+    allowed_verdicts: list[str] = field(default_factory=lambda: ["GO", "NO_GO"])
+    blocks_commit: bool = True
+    blocks_deploy: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+DEFAULT_GATES: list[GateDefinition] = [
+    GateDefinition(
+        id="intake_scope",
+        order=1,
+        title="Intake, scope, and ambiguity reduction",
+        owner="agent_1_pm_coordinator",
+        purpose="Turn the user's request into a bounded feature request with explicit unknowns and assumptions.",
+        required_artifacts=["feature_request", "assumptions", "ambiguities", "initial_blast_radius"],
+        default_mode="PLAN",
+    ),
+    GateDefinition(
+        id="stakeholders_raci",
+        order=2,
+        title="Stakeholders, RACI, and approval authority",
+        owner="agent_1_pm_coordinator",
+        purpose="Declare who can approve scope, security exceptions, production rollout, and residual risk.",
+        required_artifacts=["raci_matrix", "approval_authorities", "human_approval_points"],
+        default_mode="PLAN",
+    ),
+    GateDefinition(
+        id="mission_non_goals",
+        order=3,
+        title="Mission, non-goals, and claim discipline",
+        owner="agent_1_pm_coordinator",
+        purpose="Define what must be built, what must not be built, and which claims are forbidden unless proven.",
+        required_artifacts=["mission", "non_goals", "forbidden_claims", "success_criteria"],
+        default_mode="PLAN",
+    ),
+    GateDefinition(
+        id="repo_context_env_branch",
+        order=4,
+        title="Repo, production, branch, and environment context",
+        owner="agent_1_pm_coordinator",
+        purpose="Capture the repo state, current branch, remotes, environment assumptions, and production touch points.",
+        required_artifacts=["git_status", "current_branch", "remote_summary", "environment_profile", "production_touchpoints"],
+        default_mode="READ_ONLY",
+    ),
+    GateDefinition(
+        id="risk_blast_radius",
+        order=5,
+        title="Risk classification and blast-radius controls",
+        owner="agent_1_pm_coordinator",
+        purpose="Classify risk and activate required specialist agents, stricter policies, and deployment locks.",
+        required_artifacts=["risk_level", "risk_reasons", "blast_radius", "activated_specialists"],
+        default_mode="PLAN",
+    ),
+    GateDefinition(
+        id="data_privacy_secrets",
+        order=6,
+        title="Data, privacy, secrets, and exfiltration policy",
+        owner="agent_8_cybersecurity_engineer",
+        purpose="Prevent secrets leakage, PII misuse, data exfiltration, prompt injection, and unsafe network/tool access.",
+        required_artifacts=["data_inventory", "secret_policy", "network_policy", "privacy_constraints", "prompt_injection_controls"],
+        default_mode="SECURITY_REVIEW",
+    ),
+    GateDefinition(
+        id="baseline_freeze",
+        order=7,
+        title="Baseline/freeze gate and reproducibility snapshot",
+        owner="agent_1_pm_coordinator",
+        purpose="Freeze current state before implementation so regressions and agent mutations are auditable.",
+        required_artifacts=["git_status_before", "dependency_snapshot", "baseline_tests", "tool_versions", "run_ledger_start"],
+        default_mode="READ_ONLY",
+    ),
+    GateDefinition(
+        id="supply_chain_sbom",
+        order=8,
+        title="Supply-chain, dependency, SBOM, and license review",
+        owner="agent_8_cybersecurity_engineer",
+        purpose="Detect unsafe dependency changes, lockfile drift, license risk, provenance gaps, and unsigned artifacts.",
+        required_artifacts=["lockfile_inventory", "dependency_delta", "license_notes", "sbom_or_sbom_plan", "provenance_notes"],
+        default_mode="SECURITY_REVIEW",
+    ),
+    GateDefinition(
+        id="agent_plan_permissions",
+        order=9,
+        title="Agent plan, dependency graph, write ownership, and permissions",
+        owner="agent_1_pm_coordinator",
+        purpose="Assign role-specific responsibilities, path ownership, dependency order, and tool permissions.",
+        required_artifacts=["agent_roster", "write_ownership_matrix", "dependency_graph", "permission_matrix"],
+        default_mode="PLAN",
+    ),
+    GateDefinition(
+        id="architecture_contracts",
+        order=10,
+        title="Architecture, contracts, invariants, and failure modes",
+        owner="agent_2_architecture_contracts",
+        purpose="Define design decisions, API/data contracts, invariants, tradeoffs, and expected failure behavior.",
+        required_artifacts=["adr", "api_contracts", "data_contracts", "invariants", "failure_modes"],
+        default_mode="PLAN",
+    ),
+    GateDefinition(
+        id="ui_architecture_accessibility",
+        order=11,
+        title="UI architecture, UX states, accessibility, and dark-pattern review",
+        owner="agent_7_ui_architect",
+        purpose="Required when UI is touched: define flows, states, design-system constraints, and accessibility criteria.",
+        required_artifacts=["user_flows", "screen_states", "component_contracts", "accessibility_criteria", "dark_pattern_review"],
+        default_mode="PLAN",
+        conditional_on="has_ui",
+        allowed_verdicts=["GO", "NO_GO", "GO_WITH_ACCEPTED_RESIDUAL_RISKS", "SKIPPED"],
+    ),
+    GateDefinition(
+        id="threat_model_abuse_cases",
+        order=12,
+        title="Threat model, abuse cases, misuse cases, and adversarial assumptions",
+        owner="agent_8_cybersecurity_engineer",
+        purpose="Model attackers, abuse paths, trust boundaries, prompt-injection routes, and high-stakes misuse.",
+        required_artifacts=["trust_boundaries", "threat_model", "abuse_cases", "misuse_cases", "security_acceptance_criteria"],
+        default_mode="SECURITY_REVIEW",
+    ),
+    GateDefinition(
+        id="implementation_plan_changeset",
+        order=13,
+        title="Implementation plan and minimal change-set contract",
+        owner="agent_3_implementation_owner",
+        purpose="Plan exactly what will change, what will not change, and how the change minimizes blast radius.",
+        required_artifacts=["implementation_plan", "expected_file_changes", "migration_plan", "feature_flag_plan"],
+        default_mode="PLAN",
+    ),
+    GateDefinition(
+        id="implementation",
+        order=14,
+        title="Implementation with constrained write ownership",
+        owner="agent_3_implementation_owner",
+        purpose="Apply code changes only within approved write paths and under the active policy profile.",
+        required_artifacts=["code_diff", "changed_files", "linked_requirements", "implementation_notes"],
+        default_mode="BUILD",
+    ),
+    GateDefinition(
+        id="deterministic_quality",
+        order=15,
+        title="Deterministic quality gate: format, lint, typecheck, static checks",
+        owner="agent_5_qa_validation_owner",
+        purpose="Run deterministic validation before relying on model judgment.",
+        required_artifacts=["format_result", "lint_result", "typecheck_result", "static_check_result"],
+        default_mode="TEST",
+    ),
+    GateDefinition(
+        id="qa_tests_integration_smoke",
+        order=16,
+        title="QA: focused tests, fixtures, integration, regression, and smoke tests",
+        owner="agent_5_qa_validation_owner",
+        purpose="Prove behavior through targeted automated tests and smoke validation, not just implementation claims.",
+        required_artifacts=["focused_tests", "fixtures", "integration_tests", "regression_tests", "smoke_tests"],
+        default_mode="TEST",
+    ),
+    GateDefinition(
+        id="security_scans",
+        order=17,
+        title="Security scans: SAST, dependency, secrets, IaC, and policy checks",
+        owner="agent_8_cybersecurity_engineer",
+        purpose="Run deterministic security tools and record gaps if a scanner is unavailable.",
+        required_artifacts=["sast_result", "dependency_scan", "secret_scan", "iac_scan", "policy_check"],
+        default_mode="SECURITY_REVIEW",
+        allowed_verdicts=["GO", "NO_GO", "GO_WITH_ACCEPTED_RESIDUAL_RISKS"],
+    ),
+    GateDefinition(
+        id="observability_runbooks",
+        order=18,
+        title="Observability, telemetry, runbooks, and incident response",
+        owner="agent_9_sre_sysadmin",
+        purpose="Ensure the feature can be monitored, debugged, rolled back, and operated under incident conditions.",
+        required_artifacts=["metrics", "logs", "alerts", "runbook", "incident_response_notes"],
+        default_mode="PLAN",
+    ),
+    GateDefinition(
+        id="implementer_self_review",
+        order=19,
+        title="Implementer self-review and claim check",
+        owner="agent_3_implementation_owner",
+        purpose="Force the implementer to critique its own diff, assumptions, incomplete areas, and unsupported claims.",
+        required_artifacts=["self_review", "risk_disclosures", "claim_check", "known_gaps"],
+        default_mode="READ_ONLY",
+    ),
+    GateDefinition(
+        id="independent_redteam_cross_model",
+        order=20,
+        title="Independent brutal red-team and cross-model audit",
+        owner="agent_6_redteam_deploy_rollback",
+        purpose="Adversarially review implementation, tests, security, UX, ops, evidence, and overconfidence.",
+        required_artifacts=["redteam_findings", "cross_model_audit", "severity_table", "verdict"],
+        default_mode="READ_ONLY",
+        allowed_verdicts=["GO", "NO_GO", "GO_WITH_ACCEPTED_RESIDUAL_RISKS"],
+    ),
+    GateDefinition(
+        id="critical_high_fix_loop",
+        order=21,
+        title="CRITICAL/HIGH automatic fix loop and second validation",
+        owner="agent_1_pm_coordinator",
+        purpose="Repeat implementation ↔ red-team until CRITICAL/HIGH are gone and MEDIUM is handled.",
+        required_artifacts=["fix_tasks", "fix_diffs", "focused_retests", "second_validation", "redteam_go"],
+        default_mode="FIX",
+        allowed_verdicts=["GO", "NO_GO", "GO_WITH_ACCEPTED_RESIDUAL_RISKS"],
+    ),
+    GateDefinition(
+        id="evidence_traceability_attestations",
+        order=22,
+        title="Evidence traceability, provenance, and attestations",
+        owner="agent_4_evidence_reporting_owner",
+        purpose="Link requirements to design, code, tests, findings, fixes, and final claims with audit-ready evidence.",
+        required_artifacts=["traceability_matrix", "evidence_index", "artifact_hashes", "unsupported_claims_removed"],
+        default_mode="READ_ONLY",
+    ),
+    GateDefinition(
+        id="commit_branch_pr_ci",
+        order=23,
+        title="Commit, branch, PR, and CI gate",
+        owner="agent_1_pm_coordinator",
+        purpose="Commit safely, prefer feature branch + PR, run CI, and block direct main push by default.",
+        required_artifacts=["commit_message", "branch_name", "pr_or_push_plan", "ci_status"],
+        default_mode="PR",
+        blocks_deploy=True,
+    ),
+    GateDefinition(
+        id="deploy_rollout_postdeploy",
+        order=24,
+        title="Deployment, rollout, restart, monitoring, and rollback gate",
+        owner="agent_6_redteam_deploy_rollback",
+        purpose="Deploy only with explicit authorization, rollback commands, smoke checks, and monitoring windows.",
+        required_artifacts=["deploy_authorization", "rollback_commands", "postdeploy_smoke", "monitoring_plan", "rollback_decision_points"],
+        default_mode="DEPLOY_LOCKED",
+        conditional_on="production_rollout_allowed",
+        allowed_verdicts=["GO", "NO_GO", "GO_WITH_ACCEPTED_RESIDUAL_RISKS", "SKIPPED"],
+    ),
+    GateDefinition(
+        id="final_report_reaudit",
+        order=25,
+        title="Final report, residual risks, next audit, and maintenance plan",
+        owner="agent_4_evidence_reporting_owner",
+        purpose="Produce a claim-disciplined final report with residual risks, evidence, and scheduled re-audit triggers.",
+        required_artifacts=["final_report", "residual_risks", "next_audit_triggers", "maintenance_notes"],
+        default_mode="READ_ONLY",
+        allowed_verdicts=["GO", "GO_WITH_ACCEPTED_RESIDUAL_RISKS", "NO_GO"],
+        blocks_commit=False,
+        blocks_deploy=False,
+    ),
+]
+
+
+DEFAULT_AGENTS: list[dict[str, str]] = [
+    {"id": "agent_1_pm_coordinator", "role": "PM/coordinator, scope control, dependency graph, GO/NO-GO calls"},
+    {"id": "agent_2_architecture_contracts", "role": "Architecture, contracts, invariants, tradeoffs"},
+    {"id": "agent_3_implementation_owner", "role": "Implementation owner for constrained code changes"},
+    {"id": "agent_4_evidence_reporting_owner", "role": "Evidence, data, replay, traceability, final reporting"},
+    {"id": "agent_5_qa_validation_owner", "role": "QA, focused tests, fixtures, integration, smoke validation"},
+    {"id": "agent_6_redteam_deploy_rollback", "role": "Brutal red-team, deploy lock, rollback, post-deploy verification"},
+]
+
+
+CONDITIONAL_AGENTS: list[dict[str, str]] = [
+    {"id": "agent_7_ui_architect", "role": "UI architect, UX systems, accessibility, interaction states"},
+    {"id": "agent_8_cybersecurity_engineer", "role": "Cybersecurity, privacy, abuse cases, threat model, prompt injection"},
+    {"id": "agent_9_sre_sysadmin", "role": "SRE/sysadmin, infra, observability, rollout, incident response"},
+    {"id": "agent_10_it_enterprise_integration", "role": "IT, identity, enterprise integrations, device/network constraints"},
+    {"id": "agent_11_compliance_audit", "role": "Compliance, audit evidence, regulatory constraints, retention"},
+    {"id": "agent_12_domain_specialist", "role": "Domain specialist for trading, healthcare, payments, safety, or other high-stakes domains"},
+]
+
+
+HIGH_STAKES_TERMS = {
+    "trading",
+    "trade",
+    "strategy",
+    "alpha",
+    "profit",
+    "portfolio",
+    "payment",
+    "bank",
+    "auth",
+    "authentication",
+    "authorization",
+    "rbac",
+    "security",
+    "cyber",
+    "vulnerability",
+    "exploit",
+    "prod",
+    "production",
+    "deploy",
+    "kubernetes",
+    "terraform",
+    "healthcare",
+    "medical",
+    "pii",
+    "secret",
+    "encryption",
+}
+
+
+UI_TERMS = {
+    "ui",
+    "ux",
+    "dashboard",
+    "screen",
+    "page",
+    "form",
+    "frontend",
+    "component",
+    "button",
+    "modal",
+    "layout",
+    "design",
+    "accessibility",
+    "figma",
+}
+
+
+INFRA_TERMS = {
+    "deploy",
+    "restart",
+    "infra",
+    "infrastructure",
+    "terraform",
+    "kubernetes",
+    "helm",
+    "docker",
+    "cloud",
+    "monitoring",
+    "logging",
+    "alert",
+}
+
+
+SECURITY_TERMS = {
+    "auth",
+    "authentication",
+    "authorization",
+    "rbac",
+    "tenant",
+    "multi-tenant",
+    "security",
+    "secret",
+    "encryption",
+    "pii",
+    "vulnerability",
+    "exploit",
+    "permission",
+    "iam",
+}
+
+
+def gates_as_dicts() -> list[dict[str, Any]]:
+    return [gate.to_dict() for gate in DEFAULT_GATES]

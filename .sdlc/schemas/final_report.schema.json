@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "feature": {
+      "type": "string"
+    },
+    "findings": {
+      "type": "array"
+    },
+    "gates": {
+      "type": "array"
+    },
+    "residual_risks": {
+      "type": "array"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "verdict": {
+      "enum": [
+        "GO",
+        "NO_GO",
+        "GO_WITH_ACCEPTED_RESIDUAL_RISKS"
+      ]
+    }
+  },
+  "required": [
+    "run_id",
+    "feature",
+    "verdict",
+    "gates",
+    "findings",
+    "residual_risks"
+  ],
+  "type": "object"
+}

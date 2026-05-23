@@ -1,0 +1,6 @@
+# Project-scoped Codex configuration sample.
+# Keep the orchestrator authoritative; Codex is a worker.
+
+# Recommended defaults for this repo. Adjust at user level if needed.
+sandbox = "workspace-write"
+ask_for_approval = "untrusted"

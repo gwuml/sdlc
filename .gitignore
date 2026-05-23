@@ -1,0 +1,21 @@
+# Python build/runtime artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local environments
+.venv/
+venv/
+
+# Local secrets
+.env
+.env.*
+
+# Generated SDLC run evidence
+.sdlc/runs/
+.sdlc-worker-tmp/
+.sdlc-redteam-tmp/
+.sdlc/memory.sqlite

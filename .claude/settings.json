@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "defaultMode": "plan",
+    "deny": [
+      "Bash(git push origin main*)",
+      "Bash(rm -rf*)",
+      "Bash(*deploy*)",
+      "Bash(*restart*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [],
+    "PostToolUse": []
+  }
+}

@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sdlc-control-plane"
+version = "0.1.0"
+description = "Terminal-native Secure SDLC control plane for AI software delivery"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "R M"}]
+dependencies = [
+    "bandit>=1.7.10",
+    "checkov>=3.2.0",
+    "detect-secrets>=1.5.0",
+    "jsonschema>=4.22.0",
+    "Markdown==3.8.1",
+    "pip-audit>=2.7.3",
+]
+
+[project.scripts]
+sdlc = "sdlc.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["sdlc*"]

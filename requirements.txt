@@ -1,0 +1,3 @@
+# Canonical local/development install target.
+# Dependency versions are declared in pyproject.toml.
+-e .

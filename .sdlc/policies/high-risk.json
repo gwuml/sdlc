@@ -1,0 +1,109 @@
+{
+  "actor_proof_required_for_finding_closure": true,
+  "agents": {
+    "allowed_workers": [
+      "codex",
+      "openai-codex-primary",
+      "openai-codex-adversary",
+      "claude",
+      "gemini",
+      "kimi"
+    ],
+    "max_parallel": 6,
+    "min_parallel_for_high_or_extreme": 6,
+    "role_worker_preferences": {}
+  },
+  "claim_discipline": "STRICT",
+  "deploy_default": "LOCKED",
+  "direct_main_push_allowed": false,
+  "name": "high-risk",
+  "network_allowed": false,
+  "permissions": {
+    "implementer": {
+      "allow_paths": [
+        "sdlc/**",
+        "tests/**",
+        "docs/**",
+        ".sdlc/templates/**",
+        ".sdlc/schemas/**",
+        ".sdlc/policies/**"
+      ],
+      "deny_paths": [
+        ".env*",
+        "secrets/**",
+        "infra/prod/**",
+        ".sdlc/runs/**",
+        ".sdlc/memory.sqlite"
+      ],
+      "mode": "BUILD"
+    },
+    "redteam": {
+      "deny": [
+        "edit",
+        "write",
+        "git push",
+        "deploy",
+        "secrets access"
+      ],
+      "mode": "READ_ONLY"
+    }
+  },
+  "production_rollout_allowed": false,
+  "protected_operations": [
+    "git push origin main",
+    "production deploy",
+    "production restart",
+    "database migration",
+    "secret creation/deletion",
+    "IAM/RBAC change",
+    "destructive filesystem command",
+    "external network access"
+  ],
+  "redteam": {
+    "allowed_providers": [
+      "openai"
+    ],
+    "critical_high_auto_fix_required": true,
+    "cross_model_independence": "distinct_openai_model_identity",
+    "cross_model_required_for_high_or_extreme": true,
+    "default_workers": [
+      "openai-codex-primary",
+      "openai-codex-adversary"
+    ],
+    "implementer_cannot_close_findings": true,
+    "min_rounds_high_stakes": 3,
+    "required": true
+  },
+  "scanner_thresholds": {
+    "block_low": false,
+    "block_medium": false,
+    "block_medium_for_high_risk": true,
+    "block_severities": [
+      "CRITICAL",
+      "HIGH"
+    ],
+    "dependency_audit_required": true
+  },
+  "worker_families": {
+    "openai-codex-adversary": {
+      "adapter": "codex",
+      "model": "gpt-5.4-mini",
+      "model_env": "SDLC_OPENAI_REDTEAM_ADVERSARY_MODEL",
+      "provider": "openai",
+      "read_only_security_review": true
+    },
+    "openai-codex-primary": {
+      "adapter": "codex",
+      "model": "gpt-5.5",
+      "model_env": "SDLC_OPENAI_REDTEAM_PRIMARY_MODEL",
+      "provider": "openai",
+      "read_only_security_review": true
+    }
+  },
+  "workers": {
+    "architecture": "claude",
+    "implementation": "codex",
+    "qa": "codex",
+    "redteam": "openai-codex-primary"
+  }
+}

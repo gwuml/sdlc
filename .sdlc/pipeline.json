@@ -1,0 +1,571 @@
+[
+  {
+    "allowed_verdicts": [
+      "GO",
+      "NO_GO"
+    ],
+    "auto_skip_when_false": true,
+    "blocks_commit": true,
+    "blocks_deploy": true,
+    "conditional_on": null,
+    "default_mode": "PLAN",
+    "id": "intake_scope",
+    "order": 1,
+    "owner": "agent_1_pm_coordinator",
+    "purpose": "Turn the user's request into a bounded feature request with explicit unknowns and assumptions.",
+    "required_artifacts": [
+      "feature_request",
+      "assumptions",
+      "ambiguities",
+      "initial_blast_radius"
+    ],
+    "title": "Intake, scope, and ambiguity reduction"
+  },
+  {
+    "allowed_verdicts": [
+      "GO",
+      "NO_GO"
+    ],
+    "auto_skip_when_false": true,
+    "blocks_commit": true,
+    "blocks_deploy": true,
+    "conditional_on": null,
+    "default_mode": "PLAN",
+    "id": "stakeholders_raci",
+    "order": 2,
+    "owner": "agent_1_pm_coordinator",
+    "purpose": "Declare who can approve scope, security exceptions, production rollout, and residual risk.",
+    "required_artifacts": [
+      "raci_matrix",
+      "approval_authorities",
+      "human_approval_points"
+    ],
+    "title": "Stakeholders, RACI, and approval authority"
+  },
+  {
+    "allowed_verdicts": [
+      "GO",
+      "NO_GO"
+    ],
+    "auto_skip_when_false": true,
+    "blocks_commit": true,
+    "blocks_deploy": true,
+    "conditional_on": null,
+    "default_mode": "PLAN",
+    "id": "mission_non_goals",
+    "order": 3,
+    "owner": "agent_1_pm_coordinator",
+    "purpose": "Define what must be built, what must not be built, and which claims are forbidden unless proven.",
+    "required_artifacts": [
+      "mission",
+      "non_goals",
+      "forbidden_claims",
+      "success_criteria"
+    ],
+    "title": "Mission, non-goals, and claim discipline"
+  },
+  {
+    "allowed_verdicts": [
+      "GO",
+      "NO_GO"
+    ],
+    "auto_skip_when_false": true,
+    "blocks_commit": true,
+    "blocks_deploy": true,
+    "conditional_on": null,
+    "default_mode": "READ_ONLY",
+    "id": "repo_context_env_branch",
+    "order": 4,
+    "owner": "agent_1_pm_coordinator",
+    "purpose": "Capture the repo state, current branch, remotes, environment assumptions, and production touch points.",
+    "required_artifacts": [
+      "git_status",
+      "current_branch",
+      "remote_summary",
+      "environment_profile",
+      "production_touchpoints"
+    ],
+    "title": "Repo, production, branch, and environment context"
+  },
+  {
+    "allowed_verdicts": [
+      "GO",
+      "NO_GO"
+    ],
+    "auto_skip_when_false": true,
+    "blocks_commit": true,
+    "blocks_deploy": true,
+    "conditional_on": null,
+    "default_mode": "PLAN",
+    "id": "risk_blast_radius",
+    "order": 5,
+    "owner": "agent_1_pm_coordinator",
+    "purpose": "Classify risk and activate required specialist agents, stricter policies, and deployment locks.",
+    "required_artifacts": [
+      "risk_level",
+      "risk_reasons",
+      "blast_radius",
+      "activated_specialists"
+    ],
+    "title": "Risk classification and blast-radius controls"
+  },
+  {
+    "allowed_verdicts": [
+      "GO",
+      "NO_GO"
+    ],
+    "auto_skip_when_false": true,
+    "blocks_commit": true,
+    "blocks_deploy": true,
+    "conditional_on": null,
+    "default_mode": "SECURITY_REVIEW",
+    "id": "data_privacy_secrets",
+    "order": 6,
+    "owner": "agent_8_cybersecurity_engineer",
+    "purpose": "Prevent secrets leakage, PII misuse, data exfiltration, prompt injection, and unsafe network/tool access.",
+    "required_artifacts": [
+      "data_inventory",
+      "secret_policy",
+      "network_policy",
+      "privacy_constraints",
+      "prompt_injection_controls"
+    ],
+    "title": "Data, privacy, secrets, and exfiltration policy"
+  },
+  {
+    "allowed_verdicts": [
+      "GO",
+      "NO_GO"
+    ],
+    "auto_skip_when_false": true,
+    "blocks_commit": true,
+    "blocks_deploy": true,
+    "conditional_on": null,
+    "default_mode": "READ_ONLY",
+    "id": "baseline_freeze",
+    "order": 7,
+    "owner": "agent_1_pm_coordinator",
+    "purpose": "Freeze current state before implementation so regressions and agent mutations are auditable.",
+    "required_artifacts": [
+      "git_status_before",
+      "dependency_snapshot",
+      "baseline_tests",
+      "tool_versions",
+      "run_ledger_start"
+    ],
+    "title": "Baseline/freeze gate and reproducibility snapshot"
+  },
+  {
+    "allowed_verdicts": [
+      "GO",
+      "NO_GO"
+    ],
+    "auto_skip_when_false": true,
+    "blocks_commit": true,
+    "blocks_deploy": true,
+    "conditional_on": null,
+    "default_mode": "SECURITY_REVIEW",
+    "id": "supply_chain_sbom",
+    "order": 8,
+    "owner": "agent_8_cybersecurity_engineer",
+    "purpose": "Detect unsafe dependency changes, lockfile drift, license risk, provenance gaps, and unsigned artifacts.",
+    "required_artifacts": [
+      "lockfile_inventory",
+      "dependency_delta",
+      "license_notes",
+      "sbom_or_sbom_plan",
+      "provenance_notes"
+    ],
+    "title": "Supply-chain, dependency, SBOM, and license review"
+  },
+  {
+    "allowed_verdicts": [
+      "GO",
+      "NO_GO"
+    ],
+    "auto_skip_when_false": true,
+    "blocks_commit": true,
+    "blocks_deploy": true,
+    "conditional_on": null,
+    "default_mode": "PLAN",
+    "id": "agent_plan_permissions",
+    "order": 9,
+    "owner": "agent_1_pm_coordinator",
+    "purpose": "Assign role-specific responsibilities, path ownership, dependency order, and tool permissions.",
+    "required_artifacts": [
+      "agent_roster",
+      "write_ownership_matrix",
+      "dependency_graph",
+      "permission_matrix"
+    ],
+    "title": "Agent plan, dependency graph, write ownership, and permissions"
+  },
+  {
+    "allowed_verdicts": [
+      "GO",
+      "NO_GO"
+    ],
+    "auto_skip_when_false": true,
+    "blocks_commit": true,
+    "blocks_deploy": true,
+    "conditional_on": null,
+    "default_mode": "PLAN",
+    "id": "architecture_contracts",
+    "order": 10,
+    "owner": "agent_2_architecture_contracts",
+    "purpose": "Define design decisions, API/data contracts, invariants, tradeoffs, and expected failure behavior.",
+    "required_artifacts": [
+      "adr",
+      "api_contracts",
+      "data_contracts",
+      "invariants",
+      "failure_modes"
+    ],
+    "title": "Architecture, contracts, invariants, and failure modes"
+  },
+  {
+    "allowed_verdicts": [
+      "GO",
+      "NO_GO",
+      "GO_WITH_ACCEPTED_RESIDUAL_RISKS",
+      "SKIPPED"
+    ],
+    "auto_skip_when_false": true,
+    "blocks_commit": true,
+    "blocks_deploy": true,
+    "conditional_on": "has_ui",
+    "default_mode": "PLAN",
+    "id": "ui_architecture_accessibility",
+    "order": 11,
+    "owner": "agent_7_ui_architect",
+    "purpose": "Required when UI is touched: define flows, states, design-system constraints, and accessibility criteria.",
+    "required_artifacts": [
+      "user_flows",
+      "screen_states",
+      "component_contracts",
+      "accessibility_criteria",
+      "dark_pattern_review"
+    ],
+    "title": "UI architecture, UX states, accessibility, and dark-pattern review"
+  },
+  {
+    "allowed_verdicts": [
+      "GO",
+      "NO_GO"
+    ],
+    "auto_skip_when_false": true,
+    "blocks_commit": true,
+    "blocks_deploy": true,
+    "conditional_on": null,
+    "default_mode": "SECURITY_REVIEW",
+    "id": "threat_model_abuse_cases",
+    "order": 12,
+    "owner": "agent_8_cybersecurity_engineer",
+    "purpose": "Model attackers, abuse paths, trust boundaries, prompt-injection routes, and high-stakes misuse.",
+    "required_artifacts": [
+      "trust_boundaries",
+      "threat_model",
+      "abuse_cases",
+      "misuse_cases",
+      "security_acceptance_criteria"
+    ],
+    "title": "Threat model, abuse cases, misuse cases, and adversarial assumptions"
+  },
+  {
+    "allowed_verdicts": [
+      "GO",
+      "NO_GO"
+    ],
+    "auto_skip_when_false": true,
+    "blocks_commit": true,
+    "blocks_deploy": true,
+    "conditional_on": null,
+    "default_mode": "PLAN",
+    "id": "implementation_plan_changeset",
+    "order": 13,
+    "owner": "agent_3_implementation_owner",
+    "purpose": "Plan exactly what will change, what will not change, and how the change minimizes blast radius.",
+    "required_artifacts": [
+      "implementation_plan",
+      "expected_file_changes",
+      "migration_plan",
+      "feature_flag_plan"
+    ],
+    "title": "Implementation plan and minimal change-set contract"
+  },
+  {
+    "allowed_verdicts": [
+      "GO",
+      "NO_GO"
+    ],
+    "auto_skip_when_false": true,
+    "blocks_commit": true,
+    "blocks_deploy": true,
+    "conditional_on": null,
+    "default_mode": "BUILD",
+    "id": "implementation",
+    "order": 14,
+    "owner": "agent_3_implementation_owner",
+    "purpose": "Apply code changes only within approved write paths and under the active policy profile.",
+    "required_artifacts": [
+      "code_diff",
+      "changed_files",
+      "linked_requirements",
+      "implementation_notes"
+    ],
+    "title": "Implementation with constrained write ownership"
+  },
+  {
+    "allowed_verdicts": [
+      "GO",
+      "NO_GO"
+    ],
+    "auto_skip_when_false": true,
+    "blocks_commit": true,
+    "blocks_deploy": true,
+    "conditional_on": null,
+    "default_mode": "TEST",
+    "id": "deterministic_quality",
+    "order": 15,
+    "owner": "agent_5_qa_validation_owner",
+    "purpose": "Run deterministic validation before relying on model judgment.",
+    "required_artifacts": [
+      "format_result",
+      "lint_result",
+      "typecheck_result",
+      "static_check_result"
+    ],
+    "title": "Deterministic quality gate: format, lint, typecheck, static checks"
+  },
+  {
+    "allowed_verdicts": [
+      "GO",
+      "NO_GO"
+    ],
+    "auto_skip_when_false": true,
+    "blocks_commit": true,
+    "blocks_deploy": true,
+    "conditional_on": null,
+    "default_mode": "TEST",
+    "id": "qa_tests_integration_smoke",
+    "order": 16,
+    "owner": "agent_5_qa_validation_owner",
+    "purpose": "Prove behavior through targeted automated tests and smoke validation, not just implementation claims.",
+    "required_artifacts": [
+      "focused_tests",
+      "fixtures",
+      "integration_tests",
+      "regression_tests",
+      "smoke_tests"
+    ],
+    "title": "QA: focused tests, fixtures, integration, regression, and smoke tests"
+  },
+  {
+    "allowed_verdicts": [
+      "GO",
+      "NO_GO",
+      "GO_WITH_ACCEPTED_RESIDUAL_RISKS"
+    ],
+    "auto_skip_when_false": true,
+    "blocks_commit": true,
+    "blocks_deploy": true,
+    "conditional_on": null,
+    "default_mode": "SECURITY_REVIEW",
+    "id": "security_scans",
+    "order": 17,
+    "owner": "agent_8_cybersecurity_engineer",
+    "purpose": "Run deterministic security tools and record gaps if a scanner is unavailable.",
+    "required_artifacts": [
+      "sast_result",
+      "dependency_scan",
+      "secret_scan",
+      "iac_scan",
+      "policy_check"
+    ],
+    "title": "Security scans: SAST, dependency, secrets, IaC, and policy checks"
+  },
+  {
+    "allowed_verdicts": [
+      "GO",
+      "NO_GO"
+    ],
+    "auto_skip_when_false": true,
+    "blocks_commit": true,
+    "blocks_deploy": true,
+    "conditional_on": null,
+    "default_mode": "PLAN",
+    "id": "observability_runbooks",
+    "order": 18,
+    "owner": "agent_9_sre_sysadmin",
+    "purpose": "Ensure the feature can be monitored, debugged, rolled back, and operated under incident conditions.",
+    "required_artifacts": [
+      "metrics",
+      "logs",
+      "alerts",
+      "runbook",
+      "incident_response_notes"
+    ],
+    "title": "Observability, telemetry, runbooks, and incident response"
+  },
+  {
+    "allowed_verdicts": [
+      "GO",
+      "NO_GO"
+    ],
+    "auto_skip_when_false": true,
+    "blocks_commit": true,
+    "blocks_deploy": true,
+    "conditional_on": null,
+    "default_mode": "READ_ONLY",
+    "id": "implementer_self_review",
+    "order": 19,
+    "owner": "agent_3_implementation_owner",
+    "purpose": "Force the implementer to critique its own diff, assumptions, incomplete areas, and unsupported claims.",
+    "required_artifacts": [
+      "self_review",
+      "risk_disclosures",
+      "claim_check",
+      "known_gaps"
+    ],
+    "title": "Implementer self-review and claim check"
+  },
+  {
+    "allowed_verdicts": [
+      "GO",
+      "NO_GO",
+      "GO_WITH_ACCEPTED_RESIDUAL_RISKS"
+    ],
+    "auto_skip_when_false": true,
+    "blocks_commit": true,
+    "blocks_deploy": true,
+    "conditional_on": null,
+    "default_mode": "READ_ONLY",
+    "id": "independent_redteam_cross_model",
+    "order": 20,
+    "owner": "agent_6_redteam_deploy_rollback",
+    "purpose": "Adversarially review implementation, tests, security, UX, ops, evidence, and overconfidence.",
+    "required_artifacts": [
+      "redteam_findings",
+      "cross_model_audit",
+      "severity_table",
+      "verdict"
+    ],
+    "title": "Independent brutal red-team and cross-model audit"
+  },
+  {
+    "allowed_verdicts": [
+      "GO",
+      "NO_GO",
+      "GO_WITH_ACCEPTED_RESIDUAL_RISKS"
+    ],
+    "auto_skip_when_false": true,
+    "blocks_commit": true,
+    "blocks_deploy": true,
+    "conditional_on": null,
+    "default_mode": "FIX",
+    "id": "critical_high_fix_loop",
+    "order": 21,
+    "owner": "agent_1_pm_coordinator",
+    "purpose": "Repeat implementation \u2194 red-team until CRITICAL/HIGH are gone and MEDIUM is handled.",
+    "required_artifacts": [
+      "fix_tasks",
+      "fix_diffs",
+      "focused_retests",
+      "second_validation",
+      "redteam_go"
+    ],
+    "title": "CRITICAL/HIGH automatic fix loop and second validation"
+  },
+  {
+    "allowed_verdicts": [
+      "GO",
+      "NO_GO"
+    ],
+    "auto_skip_when_false": true,
+    "blocks_commit": true,
+    "blocks_deploy": true,
+    "conditional_on": null,
+    "default_mode": "READ_ONLY",
+    "id": "evidence_traceability_attestations",
+    "order": 22,
+    "owner": "agent_4_evidence_reporting_owner",
+    "purpose": "Link requirements to design, code, tests, findings, fixes, and final claims with audit-ready evidence.",
+    "required_artifacts": [
+      "traceability_matrix",
+      "evidence_index",
+      "artifact_hashes",
+      "unsupported_claims_removed"
+    ],
+    "title": "Evidence traceability, provenance, and attestations"
+  },
+  {
+    "allowed_verdicts": [
+      "GO",
+      "NO_GO"
+    ],
+    "auto_skip_when_false": true,
+    "blocks_commit": true,
+    "blocks_deploy": true,
+    "conditional_on": null,
+    "default_mode": "PR",
+    "id": "commit_branch_pr_ci",
+    "order": 23,
+    "owner": "agent_1_pm_coordinator",
+    "purpose": "Commit safely, prefer feature branch + PR, run CI, and block direct main push by default.",
+    "required_artifacts": [
+      "commit_message",
+      "branch_name",
+      "pr_or_push_plan",
+      "ci_status"
+    ],
+    "title": "Commit, branch, PR, and CI gate"
+  },
+  {
+    "allowed_verdicts": [
+      "GO",
+      "NO_GO",
+      "GO_WITH_ACCEPTED_RESIDUAL_RISKS",
+      "SKIPPED"
+    ],
+    "auto_skip_when_false": true,
+    "blocks_commit": true,
+    "blocks_deploy": true,
+    "conditional_on": "production_rollout_allowed",
+    "default_mode": "DEPLOY_LOCKED",
+    "id": "deploy_rollout_postdeploy",
+    "order": 24,
+    "owner": "agent_6_redteam_deploy_rollback",
+    "purpose": "Deploy only with explicit authorization, rollback commands, smoke checks, and monitoring windows.",
+    "required_artifacts": [
+      "deploy_authorization",
+      "rollback_commands",
+      "postdeploy_smoke",
+      "monitoring_plan",
+      "rollback_decision_points"
+    ],
+    "title": "Deployment, rollout, restart, monitoring, and rollback gate"
+  },
+  {
+    "allowed_verdicts": [
+      "GO",
+      "GO_WITH_ACCEPTED_RESIDUAL_RISKS",
+      "NO_GO"
+    ],
+    "auto_skip_when_false": true,
+    "blocks_commit": false,
+    "blocks_deploy": false,
+    "conditional_on": null,
+    "default_mode": "READ_ONLY",
+    "id": "final_report_reaudit",
+    "order": 25,
+    "owner": "agent_4_evidence_reporting_owner",
+    "purpose": "Produce a claim-disciplined final report with residual risks, evidence, and scheduled re-audit triggers.",
+    "required_artifacts": [
+      "final_report",
+      "residual_risks",
+      "next_audit_triggers",
+      "maintenance_notes"
+    ],
+    "title": "Final report, residual risks, next audit, and maintenance plan"
+  }
+]
