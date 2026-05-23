@@ -2967,7 +2967,7 @@ class WorkerCaptureTests(unittest.TestCase):
             old_secret = os.environ.get("SDLC_ACTOR_PROOF_KEY")
             old_leak = os.environ.get("LEAK_TEST_SECRET")
             os.environ["SDLC_ACTOR_PROOF_KEY"] = "super-secret-value"
-            os.environ["LEAK_TEST_SECRET"] = "leaky"
+            os.environ["LEAK_TEST_SECRET"] = "leaky"  # pragma: allowlist secret
             try:
                 result = run_cmd([
                     sys.executable,
