@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .ledger import Ledger
-from .util import find_files, redact_secrets, run_cmd
+from .util import find_files, redact_secrets, run_cmd, sha256_text
 
 
 PASS_STATUSES = {"PASS", "PASS_WITH_FINDINGS", "NOT_APPLICABLE"}
@@ -55,11 +55,17 @@ def run_security_scans(
     scanner_results.append(_run_checkov(repo, run_dir, ledger))
     scanner_results.append(_run_policy_check(repo, run_dir, ledger, policy))
     summary_path = _write_summary(run_dir, ledger, scanner_results)
+    summary_text = (run_dir / summary_path).read_text(encoding="utf-8")
+    verdict = scan_verdict(scanner_results)
     artifacts = [result.artifact for result in scanner_results]
     artifacts.append(summary_path)
     ledger.event(
         "security.scans_completed",
+        verdict=verdict,
         statuses={result.scanner: result.status for result in scanner_results},
+        blocking_scanners=[result.scanner for result in scanner_results if result.blocking],
+        summary_artifact=summary_path,
+        summary_sha256=sha256_text(summary_text),
         evidence=artifacts,
     )
     return scanner_results, artifacts

@@ -231,16 +231,36 @@ def _validate_security_gate_completion(store: RunStore, run_id: str, gate: GateS
     if not summary.exists():
         return "Security scans require scanner-produced security_scan_summary.md evidence"
     events = _load_run_events(store.run_dir(run_id))
-    scan_events = [event for event in events if event.get("event") == "security.scans_completed"]
-    if not scan_events:
+    latest_scan_event = _latest_canonical_security_scans_completed(store.run_dir(run_id), events)
+    if latest_scan_event is None:
         return "Security scans require ledger-backed security.scans_completed evidence"
-    latest_evidence = {str(item) for item in scan_events[-1].get("evidence", [])}
+    latest_evidence = {str(item) for item in latest_scan_event.get("evidence", [])}
     if "artifacts/security_scan_summary.md" not in latest_evidence:
         return "Security scan ledger evidence must include artifacts/security_scan_summary.md"
+    current_sha256 = _digest_file(summary)
+    if latest_scan_event.get("summary_artifact") != "artifacts/security_scan_summary.md" or latest_scan_event.get("summary_sha256") != current_sha256:
+        return "Security scan summary must match the ledger-recorded scanner completion sha256"
+    summary_event = canonical_artifact_event(
+        events,
+        run_id=run_id,
+        path="artifacts/security_scan_summary.md",
+        sha256=current_sha256,
+        allowed_events={"security.scan_summary"},
+        require_origin=True,
+        run_dir=store.run_dir(run_id),
+    )
+    if summary_event is None:
+        return "Security scan summary must be the canonical ledger-produced scan summary artifact"
+    recorded_verdict = latest_scan_event.get("verdict")
+    summary_verdict = summary_event.get("verdict")
+    if recorded_verdict not in {"GO", "NO_GO"} or summary_verdict != recorded_verdict:
+        return "Security scan completion verdict must match the canonical scan summary verdict"
     text = summary.read_text(encoding="utf-8")
-    if verdict == "GO" and "Verdict: GO" not in text:
+    if recorded_verdict == "GO" and "Verdict: GO" not in text:
+        return "Security scan summary content must match the recorded GO verdict"
+    if verdict == "GO" and recorded_verdict != "GO":
         return "Security scans can only be GO when the scanner-produced summary verdict is GO"
-    if "Verdict: NO_GO" not in text:
+    if recorded_verdict != "NO_GO":
         return None
     if verdict == "GO":
         return "Security scans with a NO_GO scanner summary require GO_WITH_ACCEPTED_RESIDUAL_RISKS and explicit residual-risk evidence; they cannot be converted to GO"
@@ -250,6 +270,29 @@ def _validate_security_gate_completion(store: RunStore, run_id: str, gate: GateS
     if "residual" not in lowered or "reason" not in lowered:
         return "Accepted residual risk for a NO_GO security scan requires notes containing residual risk and reason"
     return None
+
+
+def _latest_canonical_security_scans_completed(run_dir: Path, events: list[dict[str, object]]) -> dict[str, object] | None:
+    start = canonical_chain_start(events, require_origin=True, run_dir=run_dir)
+    if start is None:
+        return None
+    start_index, previous_sha256 = start
+    latest: dict[str, object] | None = None
+    for sequence in range(start_index, len(events)):
+        event = events[sequence]
+        if not is_canonical_ledger_event(
+            event,
+            sequence=sequence,
+            previous_sha256=previous_sha256,
+            require_origin=True,
+            run_dir=run_dir,
+        ):
+            return None
+        if event.get("event") == "security.scans_completed":
+            latest = dict(event)
+        event_sha256 = event.get("event_sha256")
+        previous_sha256 = event_sha256 if isinstance(event_sha256, str) else None
+    return latest
 
 
 def _validate_residual_risk_gate_completion(repo: Path, run_dir: Path, gate: GateState, verdict: str, actor: str | None, notes: str, evidence_paths: list[str]) -> str | None:

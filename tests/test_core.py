@@ -2492,14 +2492,52 @@ class FindingLifecycleTests(unittest.TestCase):
                     gate.verdict = "GO"
                     gate.evidence = ["evidence.md"]
             store.save_plan(plan)
-            summary = store.run_dir(run_id) / "artifacts" / "security_scan_summary.md"
-            summary.parent.mkdir(parents=True, exist_ok=True)
-            summary.write_text("# Security Scan Summary\n\nsast_result dependency_scan secret_scan iac_scan policy_check\n\nVerdict: NO_GO\n", encoding="utf-8")
-            Ledger(store.run_dir(run_id), run_id).event("security.scans_completed", evidence=["artifacts/security_scan_summary.md"])
+            summary_text = "# Security Scan Summary\n\nsast_result dependency_scan secret_scan iac_scan policy_check\n\nVerdict: NO_GO\n"
+            summary_rel = Ledger(store.run_dir(run_id), run_id).artifact("artifacts/security_scan_summary.md", summary_text, event="security.scan_summary", verdict="NO_GO")
+            Ledger(store.run_dir(run_id), run_id).event(
+                "security.scans_completed",
+                verdict="NO_GO",
+                statuses={"policy": "FAIL"},
+                blocking_scanners=["policy"],
+                summary_artifact=summary_rel,
+                summary_sha256=hashlib.sha256(summary_text.encode("utf-8")).hexdigest(),
+                evidence=[summary_rel],
+            )
             summary_arg = f".sdlc/runs/{run_id}/artifacts/security_scan_summary.md"
             self.assertNotEqual(main(["--repo", str(repo), "gate", "complete", run_id, "security_scans", "--verdict", "GO", "--actor", "agent_8_cybersecurity_engineer", "--evidence", summary_arg]), 0)
             self.assertNotEqual(main(["--repo", str(repo), "gate", "complete", run_id, "security_scans", "--verdict", "GO_WITH_ACCEPTED_RESIDUAL_RISKS", "--actor", "agent_8_cybersecurity_engineer", "--evidence", summary_arg, "--notes", "residual risk reason: network scanner blocked by policy and manually adjudicated"]), 0)
             self.assertEqual(main(["--repo", str(repo), "gate", "complete", run_id, "security_scans", "--verdict", "GO_WITH_ACCEPTED_RESIDUAL_RISKS", "--actor", "human_security_owner", "--evidence", summary_arg, "--notes", "residual risk reason: network scanner blocked by policy and manually adjudicated"]), 0)
+
+    def test_security_scan_gate_rejects_tampered_summary_verdict(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            run_id = "security-summary-tamper"
+            evidence = repo / "evidence.md"
+            evidence.write_text("prior gate evidence\n", encoding="utf-8")
+            self.assertEqual(main(["--repo", str(repo), "init"]), 0)
+            self.assertEqual(main(["--repo", str(repo), "plan", "Reject tampered scanner summary", "--run-id", run_id]), 0)
+            store = RunStore(repo)
+            plan = store.load_plan(run_id)
+            for gate in plan.gates:
+                if gate.order < 17 and gate.state != "SKIPPED":
+                    gate.state = "GO"
+                    gate.verdict = "GO"
+                    gate.evidence = ["evidence.md"]
+            store.save_plan(plan)
+            summary_text = "# Security Scan Summary\n\nVerdict: NO_GO\n"
+            summary_rel = Ledger(store.run_dir(run_id), run_id).artifact("artifacts/security_scan_summary.md", summary_text, event="security.scan_summary", verdict="NO_GO")
+            Ledger(store.run_dir(run_id), run_id).event(
+                "security.scans_completed",
+                verdict="NO_GO",
+                statuses={"policy": "FAIL"},
+                blocking_scanners=["policy"],
+                summary_artifact=summary_rel,
+                summary_sha256=hashlib.sha256(summary_text.encode("utf-8")).hexdigest(),
+                evidence=[summary_rel],
+            )
+            (store.run_dir(run_id) / summary_rel).write_text("# Security Scan Summary\n\nVerdict: GO\n", encoding="utf-8")
+            summary_arg = f".sdlc/runs/{run_id}/artifacts/security_scan_summary.md"
+            self.assertNotEqual(main(["--repo", str(repo), "gate", "complete", run_id, "security_scans", "--verdict", "GO", "--actor", "agent_8_cybersecurity_engineer", "--evidence", summary_arg]), 0)
 
     def test_final_report_gate_rejects_stale_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4679,12 +4717,22 @@ class DeployGateTests(unittest.TestCase):
             mutation_violations=[],
             evidence=[redteam_summary],
         )
+        scan_summary_text = "Security scan summary\nVerdict: GO\nscanner: policy PASS\n"
         scan_summary = ledger.artifact(
             "artifacts/security_scan_summary.md",
-            "Security scan summary\nVerdict: GO\nscanner: policy PASS\n",
-            event="artifact.written",
+            scan_summary_text,
+            event="security.scan_summary",
+            verdict="GO",
         )
-        ledger.event("security.scans_completed", verdict="GO", evidence=[scan_summary])
+        ledger.event(
+            "security.scans_completed",
+            verdict="GO",
+            statuses={"policy": "PASS"},
+            blocking_scanners=[],
+            summary_artifact=scan_summary,
+            summary_sha256=hashlib.sha256(scan_summary_text.encode("utf-8")).hexdigest(),
+            evidence=[scan_summary],
+        )
         implementation_diff = ledger.artifact(
             "artifacts/implementation_fixture.patch",
             "diff --git a/sdlc/example.py b/sdlc/example.py\n--- a/sdlc/example.py\n+++ b/sdlc/example.py\n@@ -0,0 +1 @@\n+# fixture diff\n",
@@ -4718,7 +4766,15 @@ class DeployGateTests(unittest.TestCase):
                 self.assertEqual(main(["--repo", str(repo), "git", "commit", run_id, "--message", "feat: release fixture"]), 0)
                 ledger.event("gate.manually_completed", gate="deterministic_quality", verdict="GO")
                 ledger.event("gate.manually_completed", gate="qa_tests_integration_smoke", verdict="GO")
-                ledger.event("security.scans_completed", verdict="GO", evidence=[scan_summary])
+                ledger.event(
+                    "security.scans_completed",
+                    verdict="GO",
+                    statuses={"policy": "PASS"},
+                    blocking_scanners=[],
+                    summary_artifact=scan_summary,
+                    summary_sha256=hashlib.sha256(scan_summary_text.encode("utf-8")).hexdigest(),
+                    evidence=[scan_summary],
+                )
                 ledger.event(
                     "redteam.execution_completed",
                     verdict="GO",
