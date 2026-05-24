@@ -2589,6 +2589,9 @@ def _print_status(plan: RunPlan, readiness: dict[str, object] | None = None) -> 
     if readiness:
         label = "SATISFIED" if readiness.get("release_satisfied") else "NO_GO"
         print(f"Release readiness: {label} | blockers={len(readiness.get('blockers', []))}")
+        print(f"Authority mode: {readiness.get('authority_mode', 'ADVISORY')} | production authority={readiness.get('production_authority', 'DISABLED')}")
+        if readiness.get("production_authority") == "DISABLED":
+            print("Use this run as advisory PR evidence only; it is not production deployment clearance.")
     print("\nGates:")
     gate_status = {item["gate_id"]: item for item in readiness.get("gate_readiness", [])} if readiness else {}
     for gate in sorted(plan.gates, key=lambda item: item.order):
@@ -2700,12 +2703,17 @@ def _release_readiness_payload(repo: Path, plan: RunPlan, findings: list[Finding
             "reasons": reasons,
         })
     local_verdict = final_verdict(findings, plan)
+    release_satisfied = not errors
+    authority_mode = "RELEASE_CANDIDATE_ADVISORY" if release_satisfied else "ADVISORY"
     return {
         "schema_version": 1,
         "run_id": plan.run_id,
+        "authority_mode": authority_mode,
+        "production_authority": "DISABLED",
+        "authority_reason": "Production deployment authority is disabled by default; this run is advisory evidence until explicit human deployment approval and rollback evidence are recorded.",
         "local_verdict": local_verdict,
         "release_verdict": local_verdict if not errors else "NO_GO",
-        "release_satisfied": not errors,
+        "release_satisfied": release_satisfied,
         "blockers": errors,
         "gate_readiness": gate_readiness,
     }

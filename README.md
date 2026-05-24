@@ -4,6 +4,8 @@ A terminal-native, evidence-driven, adversarial Secure SDLC orchestrator for AI 
 
 This starter product treats Codex and Claude as **workers**, not as the authority. The orchestrator owns gates, policies, permissions, evidence, red-team loops, and final claims.
 
+For hands-on use before full production clearance, follow [docs/HANDS_ON_ADVISORY_USAGE.md](docs/HANDS_ON_ADVISORY_USAGE.md). The current workflow is advisory by default: it can organize runs, evidence, findings, reports, and next actions, but it does not grant production deployment authority.
+
 ## What this is
 
 ```text

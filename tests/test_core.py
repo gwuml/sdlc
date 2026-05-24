@@ -765,6 +765,8 @@ class CoreTests(unittest.TestCase):
             readiness = read_json(repo / ".sdlc" / "runs" / run_id / "artifacts" / "release" / "readiness.json")
             self.assertFalse(readiness["release_satisfied"])
             self.assertEqual(readiness["release_verdict"], "NO_GO")
+            self.assertEqual(readiness["authority_mode"], "ADVISORY")
+            self.assertEqual(readiness["production_authority"], "DISABLED")
             payload = main(["--repo", str(repo), "next", run_id, "--json"])
             self.assertEqual(payload, 0)
             self.assertFalse((repo / ".sdlc" / "runs" / run_id / "artifacts" / "release" / "next_action.json").exists())
@@ -1731,6 +1733,8 @@ class CoreTests(unittest.TestCase):
                 closed_by="human_security_owner",
             )])
             report = build_report(repo, run_id, readiness_errors=[])
+            self.assertIn("## Authority Mode", report)
+            self.assertIn("Production authority: DISABLED", report)
             self.assertIn("Verdict: **GO_WITH_ACCEPTED_RESIDUAL_RISKS**", report)
             self.assertIn("- Release verdict: GO_WITH_ACCEPTED_RESIDUAL_RISKS", report)
 
@@ -3551,6 +3555,8 @@ class WorkerCaptureTests(unittest.TestCase):
             gemini = repo / "bin" / "gemini"
             gemini.write_text(body, encoding="utf-8")
             gemini.chmod(0o755)
+            old_hard = os.environ.get("SDLC_AUDIT_HARD_SOURCE_ISOLATION")
+            os.environ["SDLC_AUDIT_HARD_SOURCE_ISOLATION"] = "1"
             try:
                 self.assertEqual(main(["--repo", str(repo), "init"]), 0)
                 self.assertEqual(main(["--repo", str(repo), "plan", "Executed no go", "--run-id", run_id, "--risk", "high"]), 0)
@@ -3561,6 +3567,10 @@ class WorkerCaptureTests(unittest.TestCase):
                 self.assertNotEqual(main(["--repo", str(repo), "redteam", "execute", run_id, "--workers", "codex,gemini", "--rounds", "3", "--execute", "--allow-network"]), 0)
             finally:
                 os.environ["PATH"] = old_path
+                if old_hard is None:
+                    os.environ.pop("SDLC_AUDIT_HARD_SOURCE_ISOLATION", None)
+                else:
+                    os.environ["SDLC_AUDIT_HARD_SOURCE_ISOLATION"] = old_hard
             summary = (RunStore(repo).run_dir(run_id) / "artifacts" / "redteam_execution_summary.md").read_text(encoding="utf-8")
             self.assertIn("executed_families: codex, gemini", summary)
             self.assertIn("worker_verdicts: codex:NO_GO:round1, gemini:NO_GO:round1", summary)
@@ -4439,6 +4449,78 @@ print(json.dumps({
             events = [json.loads(line) for line in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
             self.assertTrue(any(event.get("event") == "redteam.worker_rejected" and event.get("reason") == "security_review_write_isolation_missing" for event in events))
 
+    def test_high_stakes_external_redteam_requires_hard_source_isolation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            run_id = "redteam-hard-isolation"
+            marker = repo / "external-worker-ran"
+            old_path = self._install_fake_worker(repo, "external-reviewer", f"#!/bin/sh\ncat >/dev/null\nprintf ran > {str(marker)!r}\nprintf '{{\"verdict\":\"GO\",\"findings\":[]}}\\n'\n")
+            old_hard = os.environ.get("SDLC_AUDIT_HARD_SOURCE_ISOLATION")
+            os.environ.pop("SDLC_AUDIT_HARD_SOURCE_ISOLATION", None)
+            try:
+                self.assertEqual(main(["--repo", str(repo), "init"]), 0)
+                self.assertEqual(main(["--repo", str(repo), "plan", "Reject external high stakes redteam", "--run-id", run_id, "--risk", "high"]), 0)
+                policy = read_json(repo / ".sdlc" / "policies" / "default.json")
+                policy["network_allowed"] = True
+                policy["worker_families"] = {
+                    "openai-review": {
+                        "command": ["external-reviewer"],
+                        "provider": "openai",
+                        "read_only_security_review": True,
+                    }
+                }
+                policy["redteam"]["allowed_providers"] = ["openai"]
+                write_json(repo / ".sdlc" / "policies" / "default.json", policy)
+                self.assertEqual(main([
+                    "--repo", str(repo), "redteam", "execute", run_id,
+                    "--workers", "openai-review",
+                    "--rounds", "3",
+                    "--execute", "--allow-network",
+                    "--allow-no-go-exit-zero",
+                ]), 0)
+            finally:
+                os.environ["PATH"] = old_path
+                if old_hard is None:
+                    os.environ.pop("SDLC_AUDIT_HARD_SOURCE_ISOLATION", None)
+                else:
+                    os.environ["SDLC_AUDIT_HARD_SOURCE_ISOLATION"] = old_hard
+            self.assertFalse(marker.exists())
+            run_dir = RunStore(repo).run_dir(run_id)
+            summary = (run_dir / "artifacts" / "redteam_execution_summary.md").read_text(encoding="utf-8")
+            self.assertIn("verdict: NO_GO", summary)
+            events = [json.loads(line) for line in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+            self.assertTrue(any(event.get("event") == "redteam.worker_rejected" and event.get("reason") == "audit_source_hard_readonly_isolation_unavailable" for event in events))
+
+    def test_redteam_rejects_when_audit_tempdir_is_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            run_id = "redteam-tmpdir-unavailable"
+            marker = repo / "temp-worker-ran"
+            old_path = self._install_fake_worker(repo, "local-reviewer", f"#!/bin/sh\ncat >/dev/null\nprintf ran > {str(marker)!r}\nprintf '{{\"verdict\":\"GO\",\"findings\":[]}}\\n'\n")
+            try:
+                self.assertEqual(main(["--repo", str(repo), "init"]), 0)
+                self.assertEqual(main(["--repo", str(repo), "plan", "Reject missing worker tempdir", "--run-id", run_id, "--risk", "low"]), 0)
+                policy = read_json(repo / ".sdlc" / "policies" / "default.json")
+                policy["network_allowed"] = True
+                policy["worker_families"] = {
+                    "local-review": {"command": ["local-reviewer"], "provider": "local", "read_only_security_review": True}
+                }
+                policy["redteam"]["allowed_providers"] = ["local"]
+                write_json(repo / ".sdlc" / "policies" / "default.json", policy)
+                with mock.patch("sdlc.engine._ensure_writable_worker_temp_dir", side_effect=OSError("no writable tmp")):
+                    self.assertEqual(main([
+                        "--repo", str(repo), "redteam", "execute", run_id,
+                        "--workers", "local-review",
+                        "--execute", "--allow-network",
+                        "--allow-no-go-exit-zero",
+                    ]), 0)
+            finally:
+                os.environ["PATH"] = old_path
+            self.assertFalse(marker.exists())
+            run_dir = RunStore(repo).run_dir(run_id)
+            events = [json.loads(line) for line in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+            self.assertTrue(any(event.get("event") == "redteam.worker_rejected" and event.get("reason") == "audit_worker_tempdir_unavailable" for event in events))
+
     def test_redteam_refreshes_report_after_persisting_findings_between_rounds(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -4895,6 +4977,8 @@ print(json.dumps({
 }))
 """
             old_path = self._install_fake_worker(repo, "codex", worker_body)
+            old_hard = os.environ.get("SDLC_AUDIT_HARD_SOURCE_ISOLATION")
+            os.environ["SDLC_AUDIT_HARD_SOURCE_ISOLATION"] = "1"
             try:
                 self.assertEqual(main(["--repo", str(repo), "init"]), 0)
                 self.assertEqual(main(["--repo", str(repo), "plan", "Build high risk redteam", "--run-id", run_id, "--risk", "high"]), 0)
@@ -4902,6 +4986,10 @@ print(json.dumps({
                 self.assertEqual(main(["--repo", str(repo), "redteam", "execute", run_id, "--workers", "codex", "--execute", "--allow-network", "--rounds", "3", "--allow-no-go-exit-zero"]), 0)
             finally:
                 os.environ["PATH"] = old_path
+                if old_hard is None:
+                    os.environ.pop("SDLC_AUDIT_HARD_SOURCE_ISOLATION", None)
+                else:
+                    os.environ["SDLC_AUDIT_HARD_SOURCE_ISOLATION"] = old_hard
             gate = next(item for item in RunStore(repo).load_plan(run_id).gates if item.id == "independent_redteam_cross_model")
             self.assertEqual(gate.verdict, "NO_GO")
             self.assertIn("two independent executed worker families", gate.notes)
@@ -4926,6 +5014,8 @@ print(json.dumps({
 }))
 """
             old_path = self._install_fake_worker(repo, "codex", worker_body)
+            old_hard = os.environ.get("SDLC_AUDIT_HARD_SOURCE_ISOLATION")
+            os.environ["SDLC_AUDIT_HARD_SOURCE_ISOLATION"] = "1"
             try:
                 self.assertEqual(main(["--repo", str(repo), "init"]), 0)
                 self.assertEqual(main(["--repo", str(repo), "plan", "Build high risk redteam", "--run-id", run_id, "--risk", "high"]), 0)
@@ -4941,6 +5031,10 @@ print(json.dumps({
                 ]), 0)
             finally:
                 os.environ["PATH"] = old_path
+                if old_hard is None:
+                    os.environ.pop("SDLC_AUDIT_HARD_SOURCE_ISOLATION", None)
+                else:
+                    os.environ["SDLC_AUDIT_HARD_SOURCE_ISOLATION"] = old_hard
             gate = next(item for item in RunStore(repo).load_plan(run_id).gates if item.id == "independent_redteam_cross_model")
             self.assertEqual(gate.verdict, "NO_GO")
             self.assertIn("distinct red-team model identities", gate.notes)

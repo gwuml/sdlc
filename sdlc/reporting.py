@@ -19,6 +19,7 @@ def build_report(repo: Path, run_id: str, *, verdict_override: str | None = None
     readiness_errors = readiness_errors or []
     release_satisfied = not readiness_errors
     release_verdict = computed_verdict if release_satisfied else "NO_GO"
+    authority_mode = "RELEASE_CANDIDATE_ADVISORY" if release_satisfied else "ADVISORY"
 
     gate_rows = "\n".join(
         f"| {gate.order:02d} | {_md_cell(gate.id)} | {_md_cell(gate.owner)} | {_md_cell(gate.state)} | {_md_cell(gate.verdict or '')} | {_md_cell(', '.join(gate.evidence))} |"
@@ -45,6 +46,12 @@ Verdict: **{verdict}**
 
 ## Claim discipline
 This report only claims that recorded gates and evidence exist. It does **not** claim profitability, safety, security, compliance, or production readiness unless those claims are explicitly backed by gate evidence.
+
+## Authority Mode
+- Mode: {authority_mode}
+- Production authority: DISABLED
+- Use: advisory PR and operator evidence only.
+- Important: this report is not production deployment clearance; deployment still requires explicit human authorization, rollout evidence, monitoring evidence, and rollback evidence.
 
 ## Release Readiness
 - Local final verdict: {computed_verdict}

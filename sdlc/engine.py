@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import sys
 import json
 import math
@@ -15,12 +16,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable
 
-from .adapters import WorkerResult, adapter_from_policy, capture_worker_result, worker_identity_group
+from .adapters import WorkerResult, _ensure_writable_worker_temp_dir, _worker_temp_dir, adapter_from_policy, capture_worker_result, worker_identity_group
 from .ledger import Ledger
 from .models import RunPlan, Finding, invalid_findings, open_findings, plan_condition_value
 from .policies import load_policy
 from .scanners import run_security_scans, scan_notes, scan_verdict
-from .util import find_files, git_current_branch, is_git_repo, read_json, run_cmd, write_json
+from .util import find_files, git_current_branch, is_git_repo, now_iso, read_json, run_cmd, write_json
 from .validation import validate_json_schema
 
 
@@ -32,6 +33,8 @@ DRY_GO_GATE_IDS = {
     "security_scans",
 }
 RUN_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,127}$")
+EXTERNAL_WORKER_PROVIDERS = {"openai", "anthropic", "google", "moonshot"}
+HARD_AUDIT_ISOLATION_ENV = "SDLC_AUDIT_HARD_SOURCE_ISOLATION"
 
 
 def validate_run_id(run_id: str) -> str:
@@ -641,6 +644,37 @@ def execute_redteam_workers(
         worker_results.append({"worker": worker, "round": round_number, "available": True, "executed": False, "artifact": artifact})
         emit_progress("redteam.worker_rejected", worker=worker, round=round_number, reason="security_review_write_isolation_missing")
 
+    def record_hard_isolation_rejected(worker: str, round_number: int, adapter: Any) -> None:
+        unavailable.append(worker)
+        provider = str(getattr(adapter, "provider", "unknown"))
+        artifact = ledger.artifact(
+            f"artifacts/redteam/round-{round_number}-{worker}-hard-source-isolation-unavailable.json",
+            json.dumps({
+                "worker": worker,
+                "provider": provider,
+                "round": round_number,
+                "available": True,
+                "executed": False,
+                "reason": (
+                    "External high-stakes red-team execution requires hard read-only source isolation. "
+                    f"Set {HARD_AUDIT_ISOLATION_ENV}=1 only when an external sandbox, container, or mount "
+                    "enforces a non-mutable source view."
+                ),
+            }, indent=2, sort_keys=True) + "\n",
+            event="redteam.worker_rejected",
+            worker=worker,
+            provider=provider,
+            round=round_number,
+            reason="audit_source_hard_readonly_isolation_unavailable",
+        )
+        worker_results.append({"worker": worker, "round": round_number, "available": True, "executed": False, "artifact": artifact})
+        emit_progress(
+            "redteam.worker_rejected",
+            worker=worker,
+            round=round_number,
+            reason="audit_source_hard_readonly_isolation_unavailable",
+        )
+
     def redteam_worker_preflight(worker: str, round_number: int) -> Any | None:
         adapter = adapter_from_policy(worker, policy)
         if adapter is None:
@@ -648,6 +682,9 @@ def execute_redteam_workers(
             return None
         if execute and not adapter.security_review_write_protected(policy):
             record_rejected(worker, round_number)
+            return None
+        if execute and _external_hard_audit_isolation_required(plan, redteam_policy, adapter) and not _hard_audit_isolation_enabled():
+            record_hard_isolation_rejected(worker, round_number, adapter)
             return None
         return adapter
 
@@ -696,6 +733,33 @@ def execute_redteam_workers(
             audit_journal = _MutationJournal(worker_repo, audit_before)
         try:
             review_mode = "SECURITY_REVIEW_AUDIT_WORKSPACE" if execute and audit_temp is not None else "SECURITY_REVIEW"
+            if execute and audit_temp is not None:
+                temp_dir = _worker_temp_dir(prompt_path, worker_repo, review_mode, run_id=plan.run_id)
+                try:
+                    _ensure_writable_worker_temp_dir(temp_dir)
+                except OSError as exc:
+                    ledger.event(
+                        "redteam.worker_rejected",
+                        worker=worker,
+                        round=round_number,
+                        reason="audit_worker_tempdir_unavailable",
+                        temp_dir=str(temp_dir),
+                        error=str(exc),
+                    )
+                    now = now_iso()
+                    return worker, round_number, WorkerResult(
+                        worker,
+                        True,
+                        False,
+                        [],
+                        126,
+                        "",
+                        f"Audit worker temp directory is not writable: {exc}",
+                        now,
+                        now,
+                        mode=review_mode,
+                        timeout_seconds=effective_timeout,
+                    ), []
             if audit_journal is not None:
                 audit_journal.start()
             result = adapter.run(prompt_path, worker_repo, review_mode, execute=execute, timeout=effective_timeout)
@@ -1111,6 +1175,20 @@ def _redteam_allowed_provider_error(workers: list[str], policy: dict[str, Any], 
     if not rejected:
         return None
     return "Red-team policy restricts worker providers to " + ", ".join(sorted(allowed)) + "; rejected " + ", ".join(rejected)
+
+
+def _external_hard_audit_isolation_required(plan: RunPlan, redteam_policy: dict[str, Any], adapter: Any) -> bool:
+    provider = str(getattr(adapter, "provider", "local")).strip().lower()
+    if provider not in EXTERNAL_WORKER_PROVIDERS:
+        return False
+    configured = redteam_policy.get("external_hard_source_isolation_required")
+    if configured is not None:
+        return bool(configured)
+    return plan.risk_level in {"HIGH", "EXTREME"}
+
+
+def _hard_audit_isolation_enabled() -> bool:
+    return os.environ.get(HARD_AUDIT_ISOLATION_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _set_redteam_gate(store: RunStore, plan: RunPlan, summary: str, worker_results: list[dict[str, Any]], verdict: str, notes: str) -> None:
