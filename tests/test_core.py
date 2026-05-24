@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import sdlc.cli as cli_module
+import sdlc.adapters as adapters_module
 from sdlc.adapters import ADAPTERS, ClaudeAdapter, CodexAdapter, GeminiAdapter, KimiAdapter, adapter_from_policy
 from sdlc.classifier import classify_feature
 from sdlc.attestations import _verify_manifest_entries
@@ -4008,6 +4009,41 @@ print('{"verdict":"GO","findings":[]}')
             self.assertTrue(result["timed_out"])
             self.assertEqual(result["timeout_seconds"], 1)
             self.assertEqual(result["timeout_scope"], "per_worker")
+
+    def test_redteam_worker_output_truncation_blocks_positive_verdict(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            run_id = "redteam-worker-truncated"
+            worker_body = """#!/usr/bin/env python3
+import sys
+
+sys.stdin.read()
+sys.stdout.write("x" * 200)
+sys.stdout.write('{"verdict":"GO","reviewed_run_id":"redteam-worker-truncated","prompt_sha256":"' + ("a" * 64) + '","findings":[]}' + "\\n")
+"""
+            old_path = self._install_fake_worker(repo, "codex", worker_body)
+            try:
+                self.assertEqual(main(["--repo", str(repo), "init"]), 0)
+                self.assertEqual(main(["--repo", str(repo), "plan", "Truncated redteam worker", "--run-id", run_id, "--risk", "low"]), 0)
+                self._allow_worker_network(repo)
+                with mock.patch.object(adapters_module, "WORKER_MAX_OUTPUT_CHARS", 64):
+                    self.assertEqual(main([
+                        "--repo", str(repo), "redteam", "execute", run_id,
+                        "--workers", "codex",
+                        "--execute", "--allow-network",
+                        "--allow-no-go-exit-zero",
+                    ]), 0)
+            finally:
+                os.environ["PATH"] = old_path
+            run_dir = RunStore(repo).run_dir(run_id)
+            summary = (run_dir / "artifacts" / "redteam_execution_summary.md").read_text(encoding="utf-8")
+            self.assertIn("truncated_workers: codex@round1:stdout:64chars", summary)
+            self.assertIn("Red-team worker output was truncated", summary)
+            result_path = next((run_dir / "worker-results").glob("*/result.json"))
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            self.assertTrue(result["stdout_truncated"])
+            self.assertFalse(result["stderr_truncated"])
+            self.assertEqual(result["max_output_chars"], 64)
 
     def test_redteam_total_timeout_skips_remaining_workers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

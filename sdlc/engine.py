@@ -591,6 +591,7 @@ def execute_redteam_workers(
     available_families: set[str] = set()
     executed_families: set[str] = set()
     timed_out_workers: list[str] = []
+    truncated_workers: list[str] = []
     skipped_due_total_timeout: list[str] = []
     active_worker: str | None = None
     active_round: int | None = None
@@ -726,6 +727,22 @@ def execute_redteam_workers(
         if result.timed_out:
             timeout_label = f"{worker}@round{round_number}:{result.timeout_scope or 'per_worker'}:{result.timeout_seconds or worker_timeout}s"
             timed_out_workers.append(timeout_label)
+        if result.stdout_truncated or result.stderr_truncated:
+            streams = []
+            if result.stdout_truncated:
+                streams.append("stdout")
+            if result.stderr_truncated:
+                streams.append("stderr")
+            truncated_label = f"{worker}@round{round_number}:{'+'.join(streams)}:{result.max_output_chars or 'unknown'}chars"
+            truncated_workers.append(truncated_label)
+            ledger.event(
+                "redteam.worker_output_truncated",
+                worker=worker,
+                round=round_number,
+                stdout_truncated=result.stdout_truncated,
+                stderr_truncated=result.stderr_truncated,
+                max_output_chars=result.max_output_chars,
+            )
         if result.available:
             available_families.add(worker)
         else:
@@ -866,6 +883,7 @@ def execute_redteam_workers(
             worker_verdicts=worker_verdicts,
             mutation_violations=sorted(set(mutation_violations)),
             timed_out_workers=timed_out_workers,
+            truncated_workers=truncated_workers,
             skipped_due_total_timeout=skipped_due_total_timeout,
             active_worker=active_worker,
             active_round=active_round,
@@ -886,6 +904,7 @@ def execute_redteam_workers(
         worker_verdicts=worker_verdicts,
         mutation_violations=sorted(set(mutation_violations)),
         timed_out_workers=timed_out_workers,
+        truncated_workers=truncated_workers,
         skipped_due_total_timeout=skipped_due_total_timeout,
         cross_model_required=bool(redteam_policy.get("cross_model_required_for_high_or_extreme", True)),
     )
@@ -902,6 +921,7 @@ def execute_redteam_workers(
         worker_verdicts=worker_verdicts,
         mutation_violations=sorted(set(mutation_violations)),
         timed_out_workers=timed_out_workers,
+        truncated_workers=truncated_workers,
         skipped_due_total_timeout=skipped_due_total_timeout,
         verdict=verdict,
         notes=notes,
@@ -925,6 +945,7 @@ def execute_redteam_workers(
         worker_verdicts=worker_verdicts,
         mutation_violations=sorted(set(mutation_violations)),
         timed_out_workers=timed_out_workers,
+        truncated_workers=truncated_workers,
         skipped_due_total_timeout=skipped_due_total_timeout,
         evidence=[summary],
         worker_timeout_seconds=worker_timeout,
@@ -946,6 +967,7 @@ def execute_redteam_workers(
         "executed_families": sorted(executed_families),
         "executed_identity_groups": sorted(executed_identity_groups),
         "timed_out_workers": timed_out_workers,
+        "truncated_workers": truncated_workers,
         "skipped_due_total_timeout": skipped_due_total_timeout,
         "worker_timeout_seconds": worker_timeout,
         "total_timeout_seconds": total_timeout_seconds,
@@ -970,6 +992,7 @@ def _record_redteam_execution_interrupted(
     worker_verdicts: list[dict[str, str]],
     mutation_violations: list[str],
     timed_out_workers: list[str],
+    truncated_workers: list[str],
     skipped_due_total_timeout: list[str],
     active_worker: str | None,
     active_round: int | None,
@@ -992,6 +1015,7 @@ def _record_redteam_execution_interrupted(
         worker_verdicts=worker_verdicts,
         mutation_violations=mutation_violations,
         timed_out_workers=timed_out_workers,
+        truncated_workers=truncated_workers,
         skipped_due_total_timeout=skipped_due_total_timeout,
         verdict="NO_GO",
         notes=notes,
@@ -1015,6 +1039,7 @@ def _record_redteam_execution_interrupted(
         worker_verdicts=worker_verdicts,
         mutation_violations=mutation_violations,
         timed_out_workers=timed_out_workers,
+        truncated_workers=truncated_workers,
         skipped_due_total_timeout=skipped_due_total_timeout,
         active_worker=active_worker,
         active_round=active_round,
@@ -1034,6 +1059,7 @@ def _record_redteam_execution_interrupted(
         "worker_verdicts": worker_verdicts,
         "mutation_violations": mutation_violations,
         "timed_out_workers": timed_out_workers,
+        "truncated_workers": truncated_workers,
         "skipped_due_total_timeout": skipped_due_total_timeout,
         "unavailable": unavailable,
         "available_families": available_families,
@@ -1589,6 +1615,7 @@ def _redteam_execution_verdict(
     worker_verdicts: list[dict[str, str]] | None = None,
     mutation_violations: list[str] | None = None,
     timed_out_workers: list[str] | None = None,
+    truncated_workers: list[str] | None = None,
     skipped_due_total_timeout: list[str] | None = None,
     cross_model_required: bool = True,
 ) -> tuple[str, str]:
@@ -1599,6 +1626,8 @@ def _redteam_execution_verdict(
         return "NO_GO", "Red-team worker mutated repository paths: " + ", ".join(mutation_violations[:10])
     if timed_out_workers:
         return "NO_GO", "Red-team worker timeouts require triage and rerun: " + ", ".join(timed_out_workers[:10])
+    if truncated_workers:
+        return "NO_GO", "Red-team worker output was truncated before complete verdict evidence was captured; rerun with bounded inspection: " + ", ".join(truncated_workers[:10])
     if skipped_due_total_timeout:
         return "NO_GO", "Red-team total command timeout expired before all workers ran: " + ", ".join(skipped_due_total_timeout[:10])
     no_go_workers = [item for item in worker_verdicts or [] if item.get("verdict") == "NO_GO"]
@@ -1646,6 +1675,7 @@ def _write_redteam_execution_summary(
     worker_verdicts: list[dict[str, str]] | None = None,
     mutation_violations: list[str] | None = None,
     timed_out_workers: list[str] | None = None,
+    truncated_workers: list[str] | None = None,
     skipped_due_total_timeout: list[str] | None = None,
     verdict: str,
     notes: str,
@@ -1680,6 +1710,7 @@ def _write_redteam_execution_summary(
         ),
         "mutation_violations: " + (", ".join(mutation_violations or []) or "<none>"),
         "timed_out_workers: " + (", ".join(timed_out_workers or []) or "<none>"),
+        "truncated_workers: " + (", ".join(truncated_workers or []) or "<none>"),
         "skipped_due_total_timeout: " + (", ".join(skipped_due_total_timeout or []) or "<none>"),
         f"parsed_findings: {', '.join(finding.id for finding in parsed_findings) if parsed_findings else '<none>'}",
         f"verdict: {verdict}",

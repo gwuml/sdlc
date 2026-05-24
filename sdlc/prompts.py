@@ -162,6 +162,13 @@ about current source code must cite the current source file. A finding about
 test reproducibility must come from a fresh command you ran in this audit
 workspace, not from an older `worker-results/**/stdout.txt` transcript.
 
+Keep command output small enough for the orchestrator to capture the final
+verdict evidence. Do not dump broad file ranges or full run artifacts. Use
+targeted `rg`, `sed`, or `nl` windows around exact symbols, cap exploratory
+output with `head`/`tail`, and stop command exploration once you have enough
+evidence to decide. The final JSON object is mandatory; if your stdout is
+truncated before that object, the orchestrator must treat your audit as `NO_GO`.
+
 Return exactly one JSON object and no prose outside JSON:
 
 ```json

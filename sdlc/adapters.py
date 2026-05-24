@@ -36,6 +36,8 @@ WORKER_ENV_ALLOWLIST = {
     "XDG_DATA_HOME",
 }
 
+WORKER_MAX_OUTPUT_CHARS = 8_000_000
+
 
 @dataclass
 class WorkerResult:
@@ -57,6 +59,9 @@ class WorkerResult:
     timeout_seconds: int | None = None
     timed_out: bool = False
     timeout_scope: str | None = None
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
+    max_output_chars: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -75,6 +80,10 @@ class WorkerResult:
             data["timeout_seconds"] = self.timeout_seconds
         if self.timeout_scope is not None:
             data["timeout_scope"] = self.timeout_scope
+        data["stdout_truncated"] = self.stdout_truncated
+        data["stderr_truncated"] = self.stderr_truncated
+        if self.max_output_chars is not None:
+            data["max_output_chars"] = self.max_output_chars
         if self.mode is not None:
             data["mode"] = self.mode
         if self.prompt_path is not None:
@@ -132,7 +141,14 @@ class WorkerAdapter:
             return WorkerResult(self.name, available, False, command, None, "", "DRY_RUN: worker execution disabled", started, now_iso(), mode=mode, timeout_seconds=timeout)
         if not available:
             return WorkerResult(self.name, False, False, command, 127, "", f"Worker not installed: {command[0] if command else self.name}", started, now_iso(), mode=mode, timeout_seconds=timeout)
-        result = run_cmd(command, repo, timeout=timeout, input_text=input_text, env=self.build_env(prompt_path, repo, mode))
+        result = run_cmd(
+            command,
+            repo,
+            timeout=timeout,
+            input_text=input_text,
+            env=self.build_env(prompt_path, repo, mode),
+            max_output_chars=WORKER_MAX_OUTPUT_CHARS,
+        )
         timed_out = result["returncode"] == 124
         stderr = result["stderr"]
         if timed_out:
@@ -152,6 +168,9 @@ class WorkerAdapter:
             timeout_seconds=timeout,
             timed_out=timed_out,
             timeout_scope="per_worker" if timed_out else None,
+            stdout_truncated=bool(result.get("stdout_truncated", False)),
+            stderr_truncated=bool(result.get("stderr_truncated", False)),
+            max_output_chars=int(result.get("max_output_chars", WORKER_MAX_OUTPUT_CHARS)),
         )
 
 
