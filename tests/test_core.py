@@ -23,10 +23,10 @@ from sdlc.adapters import ADAPTERS, ClaudeAdapter, CodexAdapter, GeminiAdapter, 
 from sdlc.classifier import classify_feature
 from sdlc.attestations import _verify_manifest_entries
 from sdlc.cli import _final_report_attestation_event_error, _ledger_event_records_after_sequence, _ledger_integrity_errors, _release_git_provenance_source_error, _release_readiness_errors, _validate_final_report_gate_completion, _validate_git_provenance_payload, _validate_non_placeholder_evidence, main
-from sdlc.engine import RunStore, _create_audit_workspace, _parse_worker_findings, _repo_snapshot as engine_repo_snapshot, _worker_declared_verdict, final_verdict, run_dry_gates
+from sdlc.engine import RunStore, _create_audit_workspace, _make_tree_writable, _parse_worker_findings, _repo_snapshot as engine_repo_snapshot, _worker_declared_verdict, final_verdict, run_dry_gates
 from sdlc.ledger import LEDGER_ARTIFACT_SCHEMA, LEDGER_EVENT_SCHEMA, Ledger, canonical_artifact_event, is_canonical_artifact_event, is_canonical_ledger_event, is_origin_authenticated_ledger_event, ledger_event_digest
 from sdlc.memory import export_memory
-from sdlc.models import Finding, GateState, open_findings
+from sdlc.models import Finding, GateState, invalid_findings, open_findings
 from sdlc.pipeline import DEFAULT_GATES
 from sdlc.prompts import render_redteam_prompt
 from sdlc.reporting import build_report
@@ -1095,6 +1095,19 @@ class CoreTests(unittest.TestCase):
         )
         self.assertEqual([item.id for item in open_findings([finding], {"HIGH"})], ["HIGH-DEFERRED"])
 
+    def test_malformed_finding_integrity_fails_closed(self) -> None:
+        finding = Finding(
+            id="BAD-SEVERITY",
+            severity="HIGH ",
+            title="Malformed severity",
+            evidence=["redteam"],
+            impact="Can hide release blockers.",
+            required_fix="Validate finding integrity.",
+            owner="agent_6_redteam_deploy_rollback",
+        )
+        self.assertEqual([item.id for item in invalid_findings([finding])], ["BAD-SEVERITY"])
+        self.assertEqual(final_verdict([finding]), "NO_GO")
+
     def test_positive_gate_evidence_rejects_generic_multiline_prose(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -1622,6 +1635,27 @@ class CoreTests(unittest.TestCase):
             report = build_report(repo, run_id, readiness_errors=[])
             self.assertIn("Verdict: **GO_WITH_ACCEPTED_RESIDUAL_RISKS**", report)
             self.assertIn("- Release verdict: GO_WITH_ACCEPTED_RESIDUAL_RISKS", report)
+
+    def test_report_escapes_finding_markdown_table_cells(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            run_id = "report-escape"
+            self.assertEqual(main(["--repo", str(repo), "init"]), 0)
+            self.assertEqual(main(["--repo", str(repo), "plan", "Escape report finding", "--run-id", run_id]), 0)
+            store = RunStore(repo)
+            store.save_findings(run_id, [Finding(
+                id="MEDIUM-INJECT",
+                severity="MEDIUM",
+                title="Break | table\n## Injected Section",
+                evidence=["redteam"],
+                impact="Impact | cell\n- fake blocker",
+                required_fix="Escape Markdown.",
+                owner="agent_4_evidence_reporting_owner",
+            )])
+            report = build_report(repo, run_id, readiness_errors=[])
+            self.assertIn("Break \\| table<br>## Injected Section", report)
+            self.assertIn("Impact \\| cell<br>- fake blocker", report)
+            self.assertNotIn("\n## Injected Section |", report)
 
     def test_deterministic_quality_uses_current_python(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3112,7 +3146,7 @@ class WorkerCaptureTests(unittest.TestCase):
             prompt.write_text("audit prompt\n", encoding="utf-8")
             adapter = CodexAdapter()
             command = adapter.build_command(prompt, repo, "SECURITY_REVIEW_AUDIT_WORKSPACE")
-            self.assertEqual(command[command.index("--sandbox") + 1], "workspace-write")
+            self.assertEqual(command[command.index("--sandbox") + 1], "read-only")
             self.assertEqual(command[command.index("--cd") + 1], str(repo.resolve(strict=False)))
             add_dirs = [command[index + 1] for index, value in enumerate(command[:-1]) if value == "--add-dir"]
             self.assertNotIn(str(repo.resolve(strict=False)), add_dirs)
@@ -3639,6 +3673,36 @@ class ScannerEvidenceTests(unittest.TestCase):
             security_gate = next(gate for gate in plan.gates if gate.id == "security_scans")
             self.assertEqual(security_gate.verdict, "GO")
 
+    def test_pip_audit_records_dependency_manifest_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            run_id = "pip-audit-manifest"
+            old_path = self._install_fake_scanners(repo)
+            try:
+                (repo / "app.py").write_text("print('hello')\n", encoding="utf-8")
+                manifest_text = "[project]\nname='demo'\nversion='0.1.0'\ndependencies=[]\n"
+                (repo / "pyproject.toml").write_text(manifest_text, encoding="utf-8")
+                self.assertEqual(main(["--repo", str(repo), "init"]), 0)
+                self.assertEqual(main(["--repo", str(repo), "plan", "Manifest-bound pip audit", "--run-id", run_id]), 0)
+                policy = read_json(repo / ".sdlc" / "policies" / "default.json")
+                policy["network_allowed"] = True
+                write_json(repo / ".sdlc" / "policies" / "default.json", policy)
+                self._satisfy_scan_prerequisites(repo, run_id)
+                self.assertEqual(main(["--repo", str(repo), "scan", run_id, "--allow-network"]), 0)
+            finally:
+                os.environ["PATH"] = old_path
+            digest = hashlib.sha256(manifest_text.encode("utf-8")).hexdigest()
+            run_dir = RunStore(repo).run_dir(run_id)
+            summary = (run_dir / "artifacts" / "security_scan_summary.md").read_text(encoding="utf-8")
+            self.assertIn(f"manifests=pyproject.toml@{digest}", summary)
+            events = [json.loads(line) for line in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertTrue(any(
+                event.get("event") == "security.scan_result"
+                and event.get("scanner") == "pip-audit"
+                and event.get("manifest_bindings") == [{"path": "pyproject.toml", "sha256": digest}]
+                for event in events
+            ))
+
     def test_pip_audit_policy_ignore_records_residual_nonblocking_finding(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -3956,6 +4020,21 @@ class RedTeamExecutionTests(unittest.TestCase):
             self.assertEqual(gate.verdict, "NO_GO")
             self.assertTrue((run_dir / "artifacts" / "redteam_execution_summary.md").exists())
             self.assertTrue((run_dir / "worker-results").exists())
+
+    def test_audit_workspace_source_files_are_readonly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "sdlc").mkdir()
+            source = repo / "sdlc" / "__init__.py"
+            source.write_text("version = 'test'\n", encoding="utf-8")
+            audit_temp, audit_repo = _create_audit_workspace(repo)
+            try:
+                audit_source = audit_repo / "sdlc" / "__init__.py"
+                with self.assertRaises(OSError):
+                    audit_source.write_text("mutated\n", encoding="utf-8")
+            finally:
+                _make_tree_writable(audit_repo)
+                audit_temp.cleanup()
 
     def test_redteam_records_unavailable_workers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4348,7 +4427,7 @@ print(json.dumps({
             gate = next(item for item in RunStore(repo).load_plan(run_id).gates if item.id == "independent_redteam_cross_model")
             self.assertEqual(gate.verdict, "NO_GO")
 
-    def test_redteam_detects_disposable_audit_workspace_mutation(self) -> None:
+    def test_redteam_blocks_disposable_audit_workspace_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             run_id = "redteam-audit-mutation"
@@ -4371,18 +4450,13 @@ printf '{"verdict":"GO","findings":[]}\\n'
             store = RunStore(repo)
             gate = next(item for item in store.load_plan(run_id).gates if item.id == "independent_redteam_cross_model")
             self.assertEqual(gate.verdict, "NO_GO")
-            self.assertIn("audit_workspace:sdlc/__init__.py", gate.notes)
             self.assertEqual(source.read_text(encoding="utf-8"), "# original\n")
             summary = (store.run_dir(run_id) / "artifacts" / "redteam_execution_summary.md").read_text(encoding="utf-8")
-            self.assertIn("mutation_violations: audit_workspace:sdlc/__init__.py", summary)
-            events = [json.loads(line) for line in (store.run_dir(run_id) / "events.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
-            self.assertTrue(any(
-                event.get("event") == "redteam.worker_policy_violation"
-                and "sdlc/__init__.py" in event.get("audit_workspace_mutations", [])
-                for event in events
-            ))
+            self.assertIn("mutation_violations: <none>", summary)
+            result_path = next((store.run_dir(run_id) / "worker-results").glob("*/stderr.txt"))
+            self.assertIn("Permission denied", result_path.read_text(encoding="utf-8"))
 
-    def test_redteam_detects_mutate_then_revert_audit_workspace_change(self) -> None:
+    def test_redteam_blocks_mutate_then_revert_audit_workspace_change(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             run_id = "redteam-mutate-revert"
@@ -4407,7 +4481,10 @@ printf '{"verdict":"GO","findings":[]}\\n'
                 os.environ["PATH"] = old_path
             store = RunStore(repo)
             summary = (store.run_dir(run_id) / "artifacts" / "redteam_execution_summary.md").read_text(encoding="utf-8")
-            self.assertIn("mutation_violations: audit_workspace:sdlc/__init__.py", summary)
+            self.assertIn("mutation_violations: <none>", summary)
+            result_path = next((store.run_dir(run_id) / "worker-results").glob("*/stderr.txt"))
+            stderr = result_path.read_text(encoding="utf-8")
+            self.assertIn("Permission denied", stderr)
             self.assertEqual(source.read_text(encoding="utf-8"), "# original\n")
 
     def test_release_validation_reports_interrupted_redteam_execution(self) -> None:

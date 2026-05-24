@@ -25,7 +25,7 @@ from .deploy import approve_deployment, execute_deployment, plan_deployment, pro
 from .engine import RunStore, create_redteam_findings, execute_redteam_workers, final_verdict, invalidate_downstream_gates, run_dry_gates, validate_run_id
 from .ledger import LEDGER_ARTIFACT_SCHEMA, LEDGER_EVENT_SCHEMA, LEGACY_PREFIX_SEAL_EVENT, Ledger, canonical_artifact_event, canonical_chain_start, is_canonical_ledger_event, ledger_event_digest
 from .memory import delete_memory, disable_memory, export_memory, init_memory, memory_status, record_episode, search_memory
-from .models import GateState, RunPlan, Finding, open_findings, plan_condition_value
+from .models import GateState, RunPlan, Finding, invalid_findings, open_findings, plan_condition_value
 from .pipeline import DEFAULT_GATES, gates_as_dicts
 from .policies import ensure_policy_files, load_policy
 from .prompts import write_prompt_bundle
@@ -3823,6 +3823,11 @@ def _release_readiness_errors(
     verdict = final_verdict(findings, plan)
     if not ignore_gate_ids and verdict not in POSITIVE_GATE_VERDICTS:
         errors.append(f"Release validation final verdict is {verdict}")
+    for finding in invalid_findings(findings):
+        errors.append(
+            f"Finding {finding.id} has invalid persisted integrity fields: "
+            f"severity={finding.severity!r}, status={finding.status!r}"
+        )
     if open_findings(findings):
         errors.append("Release validation found open findings")
     worker_policy_errors = _worker_policy_integrity_errors(events)

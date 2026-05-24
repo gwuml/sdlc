@@ -8,6 +8,7 @@ from typing import Any
 
 VALID_GATE_STATES = {"PENDING", "READY", "RUNNING", "GO", "NO_GO", "FIX_REQUIRED", "SKIPPED", "WAIVED", "BLOCKED"}
 VALID_SEVERITIES = {"CRITICAL", "HIGH", "MEDIUM", "LOW"}
+VALID_FINDING_STATUSES = {"OPEN", "FIXED_PENDING_REVIEW", "CLOSED", "ACCEPTED", "DEFERRED"}
 VALID_FINAL_VERDICTS = {"GO", "NO_GO", "GO_WITH_ACCEPTED_RESIDUAL_RISKS"}
 
 
@@ -90,6 +91,13 @@ def open_findings(findings: list[Finding], severities: set[str] | None = None) -
         if finding.severity in severities
         and finding.status not in terminal_statuses
         and not (finding.status == "DEFERRED" and finding.severity == "LOW")
+    ]
+
+
+def invalid_findings(findings: list[Finding]) -> list[Finding]:
+    return [
+        finding for finding in findings
+        if finding.severity not in VALID_SEVERITIES or finding.status not in VALID_FINDING_STATUSES
     ]
 
 

@@ -6,6 +6,7 @@ import shlex
 import shutil
 import sys
 import json
+import hashlib
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,7 @@ class ScanResult:
     severity_counts: dict[str, int] = field(default_factory=dict)
     confidence_counts: dict[str, int] = field(default_factory=dict)
     findings: list[dict[str, Any]] = field(default_factory=list)
+    manifest_bindings: list[dict[str, str]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -95,9 +97,17 @@ def _run_detect_secrets(repo: Path, run_dir: Path, ledger: Ledger) -> ScanResult
 
 
 def _run_pip_audit(repo: Path, run_dir: Path, ledger: Ledger, *, policy: dict[str, Any], network_allowed: bool) -> ScanResult:
-    if not _has_files(repo, ["pyproject.toml", "requirements*.txt"]):
+    manifest_bindings = _dependency_manifest_bindings(repo)
+    if not manifest_bindings:
         return _not_applicable(run_dir, ledger, "pip-audit", "dependency", "No Python dependency manifest found")
-    command = _tool_command("pip-audit", ["--format", "json"])
+    if (repo / "pyproject.toml").is_file():
+        command = _tool_command("pip-audit", ["--format", "json", str(repo)])
+    else:
+        requirements = [binding["path"] for binding in manifest_bindings if Path(binding["path"]).name.startswith("requirements")]
+        args = ["--format", "json"]
+        for requirement in requirements:
+            args.extend(["-r", str(repo / requirement)])
+        command = _tool_command("pip-audit", args)
     if not network_allowed:
         required = bool(policy.get("scanner_thresholds", {}).get("dependency_audit_required", True))
         return _blocked(
@@ -108,8 +118,9 @@ def _run_pip_audit(repo: Path, run_dir: Path, ledger: Ledger, *, policy: dict[st
             command,
             "Dependency vulnerability audit requires network_allowed=true and --allow-network",
             blocking=required,
+            manifest_bindings=manifest_bindings,
         )
-    return _run_scanner(repo, run_dir, ledger, "pip-audit", "dependency", command, timeout=180, normalizer=lambda result: _normalize_pip_audit(result, policy))
+    return _run_scanner(repo, run_dir, ledger, "pip-audit", "dependency", command, timeout=180, normalizer=lambda result: _normalize_pip_audit(result, policy), manifest_bindings=manifest_bindings)
 
 
 def _run_checkov(repo: Path, run_dir: Path, ledger: Ledger) -> ScanResult:
@@ -159,11 +170,24 @@ def _run_scanner(
     required: bool = True,
     timeout: int = 120,
     normalizer: Any | None = None,
+    manifest_bindings: list[dict[str, str]] | None = None,
 ) -> ScanResult:
     if not command or not _command_available(command[0]):
         status = "UNAVAILABLE" if required else "UNAVAILABLE"
         tool = command[0] if command else scanner
-        return _write_result(run_dir, ledger, scanner, category, status, command, None, f"Scanner unavailable: {tool}\n", f"Scanner unavailable: {tool}", blocking=required)
+        return _write_result(
+            run_dir,
+            ledger,
+            scanner,
+            category,
+            status,
+            command,
+            None,
+            f"Scanner unavailable: {tool}\n",
+            f"Scanner unavailable: {tool}",
+            blocking=required,
+            manifest_bindings=manifest_bindings,
+        )
     result = run_cmd(command, repo, timeout=timeout)
     content = "\n".join([
         f"$ {shlex.join(command)}",
@@ -194,6 +218,7 @@ def _run_scanner(
         severity_counts=normalized.get("severity_counts", {}),
         confidence_counts=normalized.get("confidence_counts", {}),
         findings=normalized.get("findings", []),
+        manifest_bindings=manifest_bindings or [],
     )
 
 
@@ -423,9 +448,19 @@ def _command_available(command_name: str) -> bool:
     return shutil.which(command_name) is not None
 
 
-def _blocked(run_dir: Path, ledger: Ledger, scanner: str, category: str, command: list[str], reason: str, *, blocking: bool = True) -> ScanResult:
+def _blocked(
+    run_dir: Path,
+    ledger: Ledger,
+    scanner: str,
+    category: str,
+    command: list[str],
+    reason: str,
+    *,
+    blocking: bool = True,
+    manifest_bindings: list[dict[str, str]] | None = None,
+) -> ScanResult:
     summary = reason if blocking else f"{reason}; recorded as non-blocking by policy"
-    return _write_result(run_dir, ledger, scanner, category, "BLOCKED_BY_POLICY", command, None, reason + "\n", summary, blocking=blocking)
+    return _write_result(run_dir, ledger, scanner, category, "BLOCKED_BY_POLICY", command, None, reason + "\n", summary, blocking=blocking, manifest_bindings=manifest_bindings)
 
 
 def _not_applicable(run_dir: Path, ledger: Ledger, scanner: str, category: str, reason: str) -> ScanResult:
@@ -447,6 +482,7 @@ def _write_result(
     severity_counts: dict[str, int] | None = None,
     confidence_counts: dict[str, int] | None = None,
     findings: list[dict[str, Any]] | None = None,
+    manifest_bindings: list[dict[str, str]] | None = None,
 ) -> ScanResult:
     artifact = f"artifacts/scans/{scanner}.txt"
     safe_content = redact_secrets(content)
@@ -454,6 +490,7 @@ def _write_result(
     severity_counts = severity_counts or {}
     confidence_counts = confidence_counts or {}
     findings = findings or []
+    manifest_bindings = manifest_bindings or []
     ledger.artifact(
         artifact,
         safe_content,
@@ -463,6 +500,7 @@ def _write_result(
         status=status,
         blocking=blocks_gate,
         severity_counts=severity_counts,
+        manifest_bindings=manifest_bindings,
     )
     ledger.event(
         "security.scan_result",
@@ -473,6 +511,7 @@ def _write_result(
         returncode=returncode,
         artifact=artifact,
         severity_counts=severity_counts,
+        manifest_bindings=manifest_bindings,
     )
     return ScanResult(
         scanner=scanner,
@@ -486,6 +525,7 @@ def _write_result(
         severity_counts=severity_counts,
         confidence_counts=confidence_counts,
         findings=findings,
+        manifest_bindings=manifest_bindings,
     )
 
 
@@ -497,7 +537,10 @@ def _write_summary(run_dir: Path, ledger: Ledger, results: list[ScanResult]) -> 
         "|---|---|---|---:|---|---|",
     ]
     for result in results:
-        lines.append(f"| {result.scanner} | {result.category} | {result.status} | {str(result.blocking).lower()} | {result.artifact} | {result.summary} |")
+        manifest_note = ""
+        if result.manifest_bindings:
+            manifest_note = "; manifests=" + ",".join(f"{item['path']}@{item['sha256']}" for item in result.manifest_bindings)
+        lines.append(f"| {result.scanner} | {result.category} | {result.status} | {str(result.blocking).lower()} | {result.artifact} | {result.summary}{manifest_note} |")
         if result.findings:
             counts = ", ".join(f"{severity}={count}" for severity, count in sorted(result.severity_counts.items()) if count)
             lines.append(f"| {result.scanner} normalized | findings | {counts or 'none'} | {str(result.blocking).lower()} | {result.artifact} | parsed_findings={len(result.findings)} |")
@@ -512,3 +555,16 @@ def _has_files(repo: Path, patterns: list[str]) -> bool:
             if path.is_file() and not any(part in EXCLUDED_DIRS for part in path.relative_to(repo).parts):
                 return True
     return False
+
+
+def _dependency_manifest_bindings(repo: Path) -> list[dict[str, str]]:
+    candidates = [repo / "pyproject.toml"]
+    candidates.extend(sorted(repo.glob("requirements*.txt")))
+    bindings: list[dict[str, str]] = []
+    for path in candidates:
+        if not path.is_file():
+            continue
+        rel = str(path.relative_to(repo))
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        bindings.append({"path": rel, "sha256": digest})
+    return bindings

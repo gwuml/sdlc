@@ -310,7 +310,7 @@ class CodexAdapter(WorkerAdapter):
         return prompt_path.read_text(encoding="utf-8") if prompt_path.exists() else ""
 
     def build_command(self, prompt_path: Path, repo: Path, mode: str) -> list[str]:
-        sandbox = "workspace-write" if mode in {"BUILD", "FIX", "TEST"} or _is_audit_workspace_security_review(mode) else "read-only"
+        sandbox = "workspace-write" if mode in {"BUILD", "FIX", "TEST"} else "read-only"
         codex_cwd = repo
         if _is_security_review_mode(mode):
             codex_cwd = repo.resolve(strict=False)

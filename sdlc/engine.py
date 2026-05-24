@@ -17,7 +17,7 @@ from typing import Any, Callable
 
 from .adapters import WorkerResult, adapter_from_policy, capture_worker_result, worker_identity_group
 from .ledger import Ledger
-from .models import RunPlan, Finding, open_findings, plan_condition_value
+from .models import RunPlan, Finding, invalid_findings, open_findings, plan_condition_value
 from .policies import load_policy
 from .scanners import run_security_scans, scan_notes, scan_verdict
 from .util import find_files, git_current_branch, is_git_repo, read_json, run_cmd, write_json
@@ -707,6 +707,7 @@ def execute_redteam_workers(
             if audit_journal is not None:
                 audit_mutations = sorted(set(audit_mutations + audit_journal.stop()))
             if audit_temp is not None:
+                _make_tree_writable(worker_repo)
                 audit_temp.cleanup()
         return worker, round_number, result, audit_mutations
 
@@ -1354,7 +1355,38 @@ def _create_audit_workspace(repo: Path) -> tuple[tempfile.TemporaryDirectory, Pa
     )
     (destination / ".sdlc-redteam-tmp").mkdir(parents=True, exist_ok=True)
     (destination.parent / ".sdlc-worker-tmp" / destination.name).mkdir(parents=True, exist_ok=True)
+    _make_tree_readonly(destination)
     return temp_dir, destination
+
+
+def _make_tree_readonly(root: Path) -> None:
+    for path in sorted(root.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+        try:
+            if path.is_file():
+                path.chmod(0o444)
+            elif path.is_dir():
+                path.chmod(0o555)
+        except OSError:
+            continue
+    try:
+        root.chmod(0o555)
+    except OSError:
+        pass
+
+
+def _make_tree_writable(root: Path) -> None:
+    for path in sorted(root.rglob("*"), key=lambda item: len(item.parts)):
+        try:
+            if path.is_dir():
+                path.chmod(0o755)
+            elif path.is_file():
+                path.chmod(0o644)
+        except OSError:
+            continue
+    try:
+        root.chmod(0o755)
+    except OSError:
+        pass
 
 
 def _repo_snapshot(repo: Path, *, include_run_artifacts: bool = True) -> dict[str, str]:
@@ -1724,6 +1756,8 @@ def final_verdict(findings: list[Finding], plan: RunPlan | None = None) -> str:
     if plan and any(gate.verdict == "NO_GO" or gate.state in {"NO_GO", "FIX_REQUIRED", "BLOCKED"} for gate in plan.gates):
         return "NO_GO"
     if plan and any(not _gate_complete_for_final(gate, plan) for gate in plan.gates):
+        return "NO_GO"
+    if invalid_findings(findings):
         return "NO_GO"
     critical_high = open_findings(findings, {"CRITICAL", "HIGH"})
     if critical_high:

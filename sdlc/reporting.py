@@ -21,11 +21,11 @@ def build_report(repo: Path, run_id: str, *, verdict_override: str | None = None
     release_verdict = computed_verdict if release_satisfied else "NO_GO"
 
     gate_rows = "\n".join(
-        f"| {gate.order:02d} | {gate.id} | {gate.owner} | {gate.state} | {gate.verdict or ''} | {', '.join(gate.evidence)} |"
+        f"| {gate.order:02d} | {_md_cell(gate.id)} | {_md_cell(gate.owner)} | {_md_cell(gate.state)} | {_md_cell(gate.verdict or '')} | {_md_cell(', '.join(gate.evidence))} |"
         for gate in plan.gates
     )
     finding_rows = "\n".join(
-        f"| {finding.id} | {finding.severity} | {finding.status} | {finding.title} | {finding.impact} |"
+        f"| {_md_cell(finding.id)} | {_md_cell(finding.severity)} | {_md_cell(finding.status)} | {_md_cell(finding.title)} | {_md_cell(finding.impact)} |"
         for finding in findings
     ) or "| - | - | - | No findings recorded | - |"
     deploy_gate = next((gate for gate in plan.gates if gate.id == "deploy_rollout_postdeploy"), None)
@@ -109,3 +109,12 @@ def _readiness_block(*, report_errors: list[str]) -> str:
     lines = "\n## Release Readiness Blockers\n\n"
     lines += "\n".join(f"- {error}" for error in report_errors[:25])
     return lines + "\n"
+
+
+def _md_cell(value: object) -> str:
+    text = str(value)
+    text = text.replace("\\", "\\\\")
+    text = text.replace("|", "\\|")
+    text = text.replace("\r", " ")
+    text = text.replace("\n", "<br>")
+    return text
