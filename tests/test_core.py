@@ -5451,6 +5451,33 @@ class GitIntegrationTests(unittest.TestCase):
                     self.assertIsNotNone(error)
                     self.assertIn("clean working tree", error or "")
 
+    def test_commit_branch_gate_rejects_stale_live_git_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            run_id = "git-stale-live-state"
+            self._init_git_repo(repo, run_id)
+            (repo / ".gitignore").write_text(".sdlc/\nrelease-evidence.md\n", encoding="utf-8")
+            self.assertEqual(run_cmd(["git", "add", ".gitignore"], repo)["returncode"], 0)
+            self.assertEqual(run_cmd(["git", "commit", "-m", "chore: ignore local sdlc artifacts"], repo)["returncode"], 0)
+            self.assertEqual(main(["--repo", str(repo), "git", "branch", run_id]), 0)
+            self._satisfy_commit_gates(repo, run_id)
+            (repo / "feature.txt").write_text("feature\n", encoding="utf-8")
+            self.assertEqual(run_cmd(["git", "add", "feature.txt"], repo)["returncode"], 0)
+            self.assertEqual(main(["--repo", str(repo), "git", "commit", run_id, "--message", "feat: add stale provenance fixture"]), 0)
+            self.assertEqual(main(["--repo", str(repo), "git", "pr", run_id]), 0)
+            (repo / "feature.txt").write_text("feature changed after provenance\n", encoding="utf-8")
+            plan = RunStore(repo).load_plan(run_id)
+            gate = next(item for item in plan.gates if item.id == "commit_branch_pr_ci")
+            gate.state = "READY"
+            gate.verdict = None
+            RunStore(repo).save_plan(plan)
+            self.assertNotEqual(main([
+                "--repo", str(repo), "gate", "complete", run_id, "commit_branch_pr_ci",
+                "--verdict", "GO",
+                "--actor", "agent_1_pm_coordinator",
+                "--evidence", f".sdlc/runs/{run_id}/artifacts/git/provenance.json",
+            ]), 0)
+
     def test_git_commit_requires_feature_branch_and_clean_findings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

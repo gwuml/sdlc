@@ -1962,6 +1962,38 @@ def _validate_git_provenance_payload(plan: RunPlan, payload: dict[str, object]) 
     return None
 
 
+def _validate_live_git_state_matches_provenance(repo: Path, plan: RunPlan, payload: dict[str, object]) -> str | None:
+    if not _is_git_repo_available(repo):
+        return "Live git provenance validation requires the repository root to be a git work tree"
+    branch_result = _git_command_payload(repo, ["git", "branch", "--show-current"])
+    status_result = _git_command_payload(repo, ["git", "status", "--short", "--branch"])
+    head_result = _git_command_payload(repo, ["git", "rev-parse", "HEAD"])
+    for label, result in {
+        "current branch": branch_result,
+        "status": status_result,
+        "HEAD": head_result,
+    }.items():
+        if result.get("returncode") != 0:
+            return f"Live git provenance validation failed to read {label}"
+    live_branch = str(branch_result.get("stdout", "")).strip()
+    if not live_branch or live_branch != plan.branch:
+        return f"Live git branch {live_branch or '<unknown>'} does not match run plan branch {plan.branch}"
+    branch = payload.get("branch")
+    captured_branch = str(branch.get("current", "")).strip() if isinstance(branch, dict) else ""
+    if live_branch != captured_branch:
+        return f"Live git branch {live_branch} does not match provenance branch {captured_branch or '<unknown>'}"
+    live_head = str(head_result.get("stdout", "")).strip()
+    head = payload.get("head")
+    captured_head = str(head.get("sha", "")).strip() if isinstance(head, dict) else ""
+    if live_head != captured_head:
+        return "Live git HEAD does not match provenance HEAD"
+    live_status = str(status_result.get("stdout", ""))
+    dirty_entries = _git_status_dirty_entries(live_status)
+    if dirty_entries:
+        return "Live git provenance requires a clean working tree; dirty entries: " + ", ".join(dirty_entries[:5])
+    return None
+
+
 def _git_status_dirty_entries(status_short: str) -> list[str]:
     dirty: list[str] = []
     for raw_line in status_short.splitlines():
@@ -2134,7 +2166,14 @@ def _validate_git_provenance_gate_completion(
             return "Git provenance artifact must be valid JSON"
         if not isinstance(payload, dict):
             return "Git provenance artifact must be a JSON object"
-        return _validate_git_provenance_payload(plan, payload)
+        payload_error = _validate_git_provenance_payload(plan, payload)
+        if payload_error:
+            return payload_error
+        if not audit_workspace:
+            live_error = _validate_live_git_state_matches_provenance(repo, plan, payload)
+            if live_error:
+                return live_error
+        return None
     return "Commit/branch/PR/CI gate requires ledger-backed artifacts/git/provenance.json from `sdlc git provenance`"
 
 
