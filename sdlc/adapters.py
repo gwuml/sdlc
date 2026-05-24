@@ -115,7 +115,7 @@ class WorkerAdapter:
     def build_env(self, prompt_path: Path, repo: Path, mode: str) -> dict[str, str]:
         run_id = _worker_run_id(prompt_path) or _adhoc_worker_run_id(prompt_path)
         temp_dir = _worker_temp_dir(prompt_path, repo, mode, run_id=run_id)
-        temp_dir.mkdir(parents=True, exist_ok=True)
+        _ensure_writable_worker_temp_dir(temp_dir)
         env = _safe_worker_base_env()
         env.update({
             "SDLC_WORKER_EXECUTION": "1",
@@ -141,12 +141,28 @@ class WorkerAdapter:
             return WorkerResult(self.name, available, False, command, None, "", "DRY_RUN: worker execution disabled", started, now_iso(), mode=mode, timeout_seconds=timeout)
         if not available:
             return WorkerResult(self.name, False, False, command, 127, "", f"Worker not installed: {command[0] if command else self.name}", started, now_iso(), mode=mode, timeout_seconds=timeout)
+        try:
+            env = self.build_env(prompt_path, repo, mode)
+        except OSError as exc:
+            return WorkerResult(
+                self.name,
+                available,
+                False,
+                command,
+                126,
+                "",
+                f"Worker temp directory is not writable: {exc}",
+                started,
+                now_iso(),
+                mode=mode,
+                timeout_seconds=timeout,
+            )
         result = run_cmd(
             command,
             repo,
             timeout=timeout,
             input_text=input_text,
-            env=self.build_env(prompt_path, repo, mode),
+            env=env,
             max_output_chars=WORKER_MAX_OUTPUT_CHARS,
         )
         timed_out = result["returncode"] == 124
@@ -202,6 +218,20 @@ def _worker_temp_dir(prompt_path: Path, repo: Path, mode: str, *, run_id: str | 
         repo_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", repo.resolve(strict=False).name).strip("-") or "repo"
         return repo.resolve(strict=False).parent / ".sdlc-worker-tmp" / repo_name / run_id / safe_mode
     return repo / ".sdlc-worker-tmp" / run_id / safe_mode
+
+
+def _ensure_writable_worker_temp_dir(temp_dir: Path) -> None:
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    probe = temp_dir / ".sdlc-tmpdir-probe"
+    try:
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+    except OSError:
+        try:
+            probe.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 def _codex_security_review_workspace(prompt_path: Path, repo: Path, mode: str) -> Path:

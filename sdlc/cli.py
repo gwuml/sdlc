@@ -629,14 +629,14 @@ def _resolve_evidence_reference(repo: Path, run_dir: Path, value: str) -> tuple[
     return resolved, run_rel or _repo_relative_path(repo, resolved) or str(resolved), None
 
 
-def _ledger_artifact_event(run_dir: Path, path: Path, sha256: str) -> dict[str, object] | None:
+def _ledger_artifact_event(run_dir: Path, path: Path, sha256: str, *, require_origin: bool = True) -> dict[str, object] | None:
     run_rel = _run_relative_path(run_dir, path)
     if run_rel is None:
         return None
     event = _canonical_artifact_index(
         run_dir,
         allowed_events=CANONICAL_ARTIFACT_EVENTS,
-        require_origin=True,
+        require_origin=require_origin,
     ).get((run_rel, sha256))
     if event is not None:
         return {
@@ -702,8 +702,8 @@ def _canonical_artifact_index(
     return indexed
 
 
-def _artifact_provenance(repo: Path, run_dir: Path, path: Path, sha256: str) -> tuple[dict[str, object] | None, str | None]:
-    ledger_event = _ledger_artifact_event(run_dir, path, sha256)
+def _artifact_provenance(repo: Path, run_dir: Path, path: Path, sha256: str, *, require_origin: bool = True) -> tuple[dict[str, object] | None, str | None]:
+    ledger_event = _ledger_artifact_event(run_dir, path, sha256, require_origin=require_origin)
     if ledger_event:
         return ledger_event, None
     run_rel = _run_relative_path(run_dir, path)
@@ -931,6 +931,8 @@ def _build_gate_artifact_bindings(
     gate_id: str,
     artifacts: dict[str, str],
     source_evidence: list[str],
+    *,
+    require_origin: bool = True,
 ) -> tuple[dict[str, dict[str, object]], str | None]:
     source_paths: set[Path] = set()
     for source in source_evidence:
@@ -951,7 +953,7 @@ def _build_gate_artifact_bindings(
         if content_error:
             return {}, content_error
         digest = _digest_file(path)
-        provenance, provenance_error = _artifact_provenance(repo, run_dir, path, digest)
+        provenance, provenance_error = _artifact_provenance(repo, run_dir, path, digest, require_origin=require_origin)
         if provenance_error or provenance is None:
             return {}, provenance_error or f"Gate artifact {key} lacks provenance"
         bindings[key] = {
@@ -963,12 +965,12 @@ def _build_gate_artifact_bindings(
     return bindings, None
 
 
-def _validate_release_gate_evidence(repo: Path, run_dir: Path, gate: GateState, verdict: str, evidence_paths: list[str]) -> str | None:
+def _validate_release_gate_evidence(repo: Path, run_dir: Path, gate: GateState, verdict: str, evidence_paths: list[str], *, require_origin: bool = True) -> str | None:
     if verdict not in POSITIVE_GATE_VERDICTS:
         return None
     if evidence_paths and all("gate_evidence_index" in path for path in evidence_paths):
         return f"{gate.id} requires gate-specific evidence, not only a shared evidence index"
-    return _validate_gate_evidence_contract(run_dir, gate, evidence_paths)
+    return _validate_gate_evidence_contract(run_dir, gate, evidence_paths, require_origin=require_origin)
 
 
 def _validate_attestation_gate_completion(store: RunStore, plan: RunPlan, gate: GateState, verdict: str, evidence_paths: list[str]) -> str | None:
@@ -1146,7 +1148,7 @@ def _recorded_gate_evidence_records(run_dir: Path, gate_id: str) -> dict[str, st
     return records
 
 
-def _validate_gate_evidence_contract(run_dir: Path, gate: GateState, evidence_paths: list[str]) -> str | None:
+def _validate_gate_evidence_contract(run_dir: Path, gate: GateState, evidence_paths: list[str], *, require_origin: bool = True) -> str | None:
     specialized = {
         "security_scans",
         "independent_redteam_cross_model",
@@ -1191,7 +1193,13 @@ def _validate_gate_evidence_contract(run_dir: Path, gate: GateState, evidence_pa
             continue
         if any(not isinstance(source, str) for source in source_evidence):
             continue
-        source_binding_error = _validate_source_evidence_bindings(repo, run_dir, [str(source) for source in source_evidence], payload.get("source_evidence_bindings"))
+        source_binding_error = _validate_source_evidence_bindings(
+            repo,
+            run_dir,
+            [str(source) for source in source_evidence],
+            payload.get("source_evidence_bindings"),
+            require_origin=require_origin,
+        )
         if source_binding_error:
             continue
         if not _source_evidence_covers_required_artifacts(repo, run_dir, source_evidence, required):
@@ -1212,6 +1220,7 @@ def _validate_gate_evidence_contract(run_dir: Path, gate: GateState, evidence_pa
             gate.id,
             {str(key): str(value) for key, value in artifacts.items()},
             [str(source) for source in source_evidence],
+            require_origin=require_origin,
         )
         if binding_error:
             continue
@@ -1233,14 +1242,14 @@ def _validate_gate_evidence_contract(run_dir: Path, gate: GateState, evidence_pa
     return expected_error
 
 
-def _build_source_evidence_bindings(repo: Path, run_dir: Path, source_evidence: list[str]) -> tuple[list[dict[str, object]], str | None]:
+def _build_source_evidence_bindings(repo: Path, run_dir: Path, source_evidence: list[str], *, require_origin: bool = True) -> tuple[list[dict[str, object]], str | None]:
     bindings: list[dict[str, object]] = []
     for source in source_evidence:
         path, canonical, error = _resolve_evidence_reference(repo, run_dir, source)
         if error or path is None or canonical is None:
             return [], f"Gate source evidence is missing or invalid: {source}"
         digest = _digest_file(path)
-        provenance, provenance_error = _artifact_provenance(repo, run_dir, path, digest)
+        provenance, provenance_error = _artifact_provenance(repo, run_dir, path, digest, require_origin=require_origin)
         if provenance_error or provenance is None:
             return [], provenance_error or f"Gate source evidence lacks provenance: {source}"
         bindings.append({
@@ -1252,7 +1261,7 @@ def _build_source_evidence_bindings(repo: Path, run_dir: Path, source_evidence: 
     return bindings, None
 
 
-def _validate_source_evidence_bindings(repo: Path, run_dir: Path, source_evidence: list[str], bindings: object) -> str | None:
+def _validate_source_evidence_bindings(repo: Path, run_dir: Path, source_evidence: list[str], bindings: object, *, require_origin: bool = True) -> str | None:
     if isinstance(bindings, list):
         if len(bindings) != len(source_evidence):
             return "Gate source evidence binding count mismatch"
@@ -1268,7 +1277,7 @@ def _validate_source_evidence_bindings(repo: Path, run_dir: Path, source_evidenc
                 return f"Gate source evidence is unavailable: {source}"
             if binding.get("path") != canonical or binding.get("sha256") != digest:
                 return "Gate source evidence digest changed after recording"
-            provenance, provenance_error = _artifact_provenance(repo, run_dir, path, digest)
+            provenance, provenance_error = _artifact_provenance(repo, run_dir, path, digest, require_origin=require_origin)
             if provenance_error or provenance is None:
                 return provenance_error or f"Gate source evidence lacks provenance: {source}"
         return None
@@ -1283,7 +1292,7 @@ def _validate_source_evidence_bindings(repo: Path, run_dir: Path, source_evidenc
             digest = _digest_file(path)
         except OSError:
             return f"Gate source evidence is unavailable: {source}"
-        provenance, provenance_error = _artifact_provenance(repo, run_dir, path, digest)
+        provenance, provenance_error = _artifact_provenance(repo, run_dir, path, digest, require_origin=require_origin)
         if provenance_error or provenance is None:
             return provenance_error or f"Gate source evidence lacks provenance: {source}"
     return None
@@ -2163,7 +2172,7 @@ def _validate_git_provenance_gate_completion(
         if error or path is None or canonical is None:
             continue
         digest = _digest_file(path)
-        provenance, provenance_error = _artifact_provenance(repo, run_dir, path, digest)
+        provenance, provenance_error = _artifact_provenance(repo, run_dir, path, digest, require_origin=not audit_workspace)
         if provenance_error or provenance is None or provenance.get("event") != "git.provenance_artifact":
             continue
         try:
@@ -3874,7 +3883,14 @@ def _release_readiness_errors(
         placeholder_error = _validate_non_placeholder_evidence(repo, gate.verdict or "", gate.evidence)
         if placeholder_error:
             errors.append(placeholder_error)
-        release_evidence_error = _validate_release_gate_evidence(repo, run_dir, gate, gate.verdict or "", gate.evidence)
+        release_evidence_error = _validate_release_gate_evidence(
+            repo,
+            run_dir,
+            gate,
+            gate.verdict or "",
+            gate.evidence,
+            require_origin=not audit_workspace_copy,
+        )
         if release_evidence_error:
             errors.append(release_evidence_error)
         git_context_error = _validate_git_context_gate_release(plan, repo, run_dir, gate)

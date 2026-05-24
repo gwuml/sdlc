@@ -557,6 +557,39 @@ class CoreTests(unittest.TestCase):
             self.assertTrue(_ledger_integrity_errors(copied_run_dir, require_origin=True))
             self.assertEqual(_ledger_integrity_errors(copied_run_dir, require_origin=False), [])
 
+    def test_audit_copy_can_verify_typed_gate_evidence_without_origin_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            audit_repo = Path(tmp) / "audit"
+            run_id = "gate-audit-copy"
+            self.assertEqual(main(["--repo", str(repo), "init"]), 0)
+            self.assertEqual(main(["--repo", str(repo), "plan", "Audit copied gate evidence", "--run-id", run_id]), 0)
+            evidence = record_gate_evidence(repo, run_id, "intake_scope", "agent_1_pm_coordinator")
+            store = RunStore(repo)
+            plan = store.load_plan(run_id)
+            gate = next(item for item in plan.gates if item.id == "intake_scope")
+            gate.state = "GO"
+            gate.verdict = "GO"
+            gate.evidence = [evidence]
+            store.save_plan(plan)
+
+            copied_run_dir = audit_repo / ".sdlc" / "runs" / run_id
+            shutil.copytree(store.run_dir(run_id), copied_run_dir)
+            audit_store = RunStore(audit_repo)
+            audit_plan = audit_store.load_plan(run_id)
+            audit_gate = next(item for item in audit_plan.gates if item.id == "intake_scope")
+            strict_error = cli_module._validate_release_gate_evidence(audit_repo, copied_run_dir, audit_gate, "GO", audit_gate.evidence)
+            self.assertIsNotNone(strict_error)
+            audit_error = cli_module._validate_release_gate_evidence(
+                audit_repo,
+                copied_run_dir,
+                audit_gate,
+                "GO",
+                audit_gate.evidence,
+                require_origin=False,
+            )
+            self.assertIsNone(audit_error)
+
     def test_audit_copy_can_verify_closure_artifacts_without_origin_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / "repo"
@@ -3190,6 +3223,9 @@ class WorkerCaptureTests(unittest.TestCase):
             self.assertEqual(env["TMPDIR"], writable_dir)
             self.assertNotIn(str(repo), env["TMPDIR"])
             self.assertTrue(Path(env["TMPDIR"]).exists())
+            probe = Path(env["TMPDIR"]) / "probe.txt"
+            probe.write_text("ok", encoding="utf-8")
+            self.assertEqual(probe.read_text(encoding="utf-8"), "ok")
 
     def test_run_cmd_strips_sensitive_environment_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
