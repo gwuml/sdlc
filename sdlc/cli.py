@@ -1559,11 +1559,14 @@ def _finding_close_error(
             for item in ledger_backed
         )
         has_validation = any(
-            item.get("event") in {"finding.remediation_validation", "remediation.validation_artifact"}
-            and item.get("finding_id") == finding.id
-            and item.get("returncode") == 0
-            and item.get("validated_by") not in {finding.owner, "agent_3_implementation_owner", None, ""}
-            and "returncode: 0" in str(item.get("text", "")).lower()
+            _valid_independent_remediation_validation(
+                item,
+                finding=finding,
+                closed_by=closed_by,
+                actor_proof=actor_proof,
+                require_actor_proof=bool(policy.get("actor_proof_required_for_finding_closure"))
+                and finding.severity in {"CRITICAL", "HIGH"},
+            )
             for item in ledger_backed
         )
         if not has_diff:
@@ -1573,6 +1576,37 @@ def _finding_close_error(
         if not has_summary:
             return "CRITICAL/HIGH/MEDIUM closure requires a ledger-backed remediation summary for this finding id"
     return None
+
+
+def _valid_independent_remediation_validation(
+    item: dict[str, object],
+    *,
+    finding: Finding,
+    closed_by: str,
+    actor_proof: str | None = None,
+    require_actor_proof: bool = False,
+) -> bool:
+    if item.get("event") not in {"finding.remediation_validation", "remediation.validation_artifact"}:
+        return False
+    if item.get("finding_id") != finding.id or item.get("returncode") != 0:
+        return False
+    if "returncode: 0" not in str(item.get("text", "")).lower():
+        return False
+    if closed_by == finding.owner or closed_by == "agent_3_implementation_owner":
+        return False
+    if closed_by not in AUTHORIZED_FINDING_CLOSERS:
+        return False
+    if item.get("validated_by") != closed_by:
+        return False
+    if require_actor_proof:
+        proof_hash = item.get("validator_actor_proof_sha256")
+        if not isinstance(proof_hash, str) or not re.fullmatch(r"[a-f0-9]{64}", proof_hash):
+            return False
+        if actor_proof is not None:
+            expected = hashlib.sha256(actor_proof.encode("utf-8")).hexdigest()
+            if not hmac.compare_digest(proof_hash, expected):
+                return False
+    return True
 
 
 def _blocking_acceptance_evidence_error(
@@ -3970,11 +4004,12 @@ def _terminal_finding_evidence_error(repo: Path, run_dir: Path, finding: Finding
                 for item in ledger_backed
             )
             has_validation = any(
-                item.get("event") in {"finding.remediation_validation", "remediation.validation_artifact"}
-                and item.get("finding_id") == finding.id
-                and item.get("returncode") == 0
-                and item.get("validated_by") not in {finding.owner, "agent_3_implementation_owner", None, ""}
-                and "returncode: 0" in str(item.get("text", "")).lower()
+                _valid_independent_remediation_validation(
+                    item,
+                    finding=finding,
+                    closed_by=finding.closed_by,
+                    require_actor_proof=finding.severity in {"CRITICAL", "HIGH"},
+                )
                 for item in ledger_backed
             )
             if not has_diff:

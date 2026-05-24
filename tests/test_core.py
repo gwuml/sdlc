@@ -228,7 +228,14 @@ def record_gate_evidence(repo: Path, run_id: str, gate_id: str, actor: str) -> s
     return f".sdlc/runs/{run_id}/artifacts/gates/{gate_id}-evidence.json"
 
 
-def record_finding_closure_evidence(repo: Path, run_id: str, finding_id: str, *, validated_by: str = "agent_6_redteam_deploy_rollback") -> list[str]:
+def record_finding_closure_evidence(
+    repo: Path,
+    run_id: str,
+    finding_id: str,
+    *,
+    validated_by: str = "agent_6_redteam_deploy_rollback",
+    validator_actor_proof: str | None = None,
+) -> list[str]:
     run_dir = RunStore(repo).run_dir(run_id)
     ledger = Ledger(run_dir, run_id)
     diff = ledger.artifact(
@@ -244,6 +251,7 @@ def record_finding_closure_evidence(repo: Path, run_id: str, finding_id: str, *,
         finding_id=finding_id,
         returncode=0,
         validated_by=validated_by,
+        **({"validator_actor_proof_sha256": hashlib.sha256(validator_actor_proof.encode("utf-8")).hexdigest()} if validator_actor_proof else {}),
     )
     summary = ledger.artifact(
         f"artifacts/findings/{finding_id}/summary.md",
@@ -1779,6 +1787,12 @@ class FindingLifecycleTests(unittest.TestCase):
                     "--evidence", f".sdlc/runs/{run_id}/{risk_artifact}",
                 ]), 0)
                 proof = actor_proof(run_id, "HIGH-001", "agent_6_redteam_deploy_rollback", key)
+                closure_evidence = record_finding_closure_evidence(
+                    repo,
+                    run_id,
+                    "HIGH-001",
+                    validator_actor_proof=proof,
+                )
                 self.assertEqual(main(["--repo", str(repo), "finding", "close", run_id, "HIGH-001", "--closed-by", "agent_6_redteam_deploy_rollback", "--actor-proof", proof, "--evidence", *closure_evidence]), 0)
             finally:
                 if old_key is None:
@@ -1988,6 +2002,13 @@ class FindingLifecycleTests(unittest.TestCase):
             os.environ["SDLC_ACTOR_PROOF_KEY"] = key
             try:
                 proof = actor_proof(run_id, "HIGH-999", "agent_4_evidence_reporting_owner", key)
+                closure_evidence = record_finding_closure_evidence(
+                    repo,
+                    run_id,
+                    "HIGH-999",
+                    validated_by="agent_4_evidence_reporting_owner",
+                    validator_actor_proof=proof,
+                )
                 self.assertEqual(main(["--repo", str(repo), "finding", "close", run_id, "HIGH-999", "--closed-by", "agent_4_evidence_reporting_owner", "--actor-proof", proof, "--evidence", *closure_evidence]), 0)
             finally:
                 if old_key is None:
@@ -2065,15 +2086,94 @@ class FindingLifecycleTests(unittest.TestCase):
                 required_fix="Require actor proof.",
                 owner="agent_3_implementation_owner",
             )])
-            closure_evidence = record_finding_closure_evidence(repo, run_id, "HIGH-888")
             key = "test-local-actor-key"
             proof = actor_proof(run_id, "HIGH-888", "agent_6_redteam_deploy_rollback", key)
+            closure_evidence = record_finding_closure_evidence(
+                repo,
+                run_id,
+                "HIGH-888",
+                validator_actor_proof=proof,
+            )
             old_key = os.environ.get("SDLC_ACTOR_PROOF_KEY")
             os.environ["SDLC_ACTOR_PROOF_KEY"] = key
             try:
                 self.assertNotEqual(main(["--repo", str(repo), "finding", "close", run_id, "HIGH-888", "--closed-by", "agent_6_redteam_deploy_rollback", "--evidence", *closure_evidence]), 0)
                 self.assertNotEqual(main(["--repo", str(repo), "finding", "close", run_id, "HIGH-888", "--closed-by", "agent_6_redteam_deploy_rollback", "--actor-proof", "bad", "--evidence", *closure_evidence]), 0)
                 self.assertEqual(main(["--repo", str(repo), "finding", "close", run_id, "HIGH-888", "--closed-by", "agent_6_redteam_deploy_rollback", "--actor-proof", proof, "--evidence", *closure_evidence]), 0)
+            finally:
+                if old_key is None:
+                    os.environ.pop("SDLC_ACTOR_PROOF_KEY", None)
+                else:
+                    os.environ["SDLC_ACTOR_PROOF_KEY"] = old_key
+
+    def test_high_finding_close_rejects_spoofed_validation_actor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            run_id = "finding-spoof-validator"
+            self.assertEqual(main(["--repo", str(repo), "init"]), 0)
+            self.assertEqual(main(["--repo", str(repo), "plan", "Reject spoofed validation actor", "--run-id", run_id]), 0)
+            store = RunStore(repo)
+            store.save_findings(run_id, [Finding(
+                id="HIGH-SPOOF",
+                severity="HIGH",
+                title="Spoofed validation",
+                evidence=["redteam"],
+                impact="Fake validation can close a blocker.",
+                required_fix="Bind validation to the closer.",
+                owner="agent_3_implementation_owner",
+            )])
+            key = "test-local-actor-key"
+            proof = actor_proof(run_id, "HIGH-SPOOF", "agent_6_redteam_deploy_rollback", key)
+            closure_evidence = record_finding_closure_evidence(
+                repo,
+                run_id,
+                "HIGH-SPOOF",
+                validated_by="not-a-real-validator",
+                validator_actor_proof=proof,
+            )
+            old_key = os.environ.get("SDLC_ACTOR_PROOF_KEY")
+            os.environ["SDLC_ACTOR_PROOF_KEY"] = key
+            try:
+                self.assertNotEqual(main([
+                    "--repo", str(repo), "finding", "close", run_id, "HIGH-SPOOF",
+                    "--closed-by", "agent_6_redteam_deploy_rollback",
+                    "--actor-proof", proof,
+                    "--evidence", *closure_evidence,
+                ]), 0)
+            finally:
+                if old_key is None:
+                    os.environ.pop("SDLC_ACTOR_PROOF_KEY", None)
+                else:
+                    os.environ["SDLC_ACTOR_PROOF_KEY"] = old_key
+
+    def test_high_finding_close_rejects_unbound_validation_proof(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            run_id = "finding-unbound-validator"
+            self.assertEqual(main(["--repo", str(repo), "init"]), 0)
+            self.assertEqual(main(["--repo", str(repo), "plan", "Reject unbound validator proof", "--run-id", run_id]), 0)
+            store = RunStore(repo)
+            store.save_findings(run_id, [Finding(
+                id="HIGH-UNBOUND",
+                severity="HIGH",
+                title="Unbound validation proof",
+                evidence=["redteam"],
+                impact="Validation without proof can be spoofed.",
+                required_fix="Bind proof to validation artifact.",
+                owner="agent_3_implementation_owner",
+            )])
+            key = "test-local-actor-key"
+            proof = actor_proof(run_id, "HIGH-UNBOUND", "agent_6_redteam_deploy_rollback", key)
+            closure_evidence = record_finding_closure_evidence(repo, run_id, "HIGH-UNBOUND")
+            old_key = os.environ.get("SDLC_ACTOR_PROOF_KEY")
+            os.environ["SDLC_ACTOR_PROOF_KEY"] = key
+            try:
+                self.assertNotEqual(main([
+                    "--repo", str(repo), "finding", "close", run_id, "HIGH-UNBOUND",
+                    "--closed-by", "agent_6_redteam_deploy_rollback",
+                    "--actor-proof", proof,
+                    "--evidence", *closure_evidence,
+                ]), 0)
             finally:
                 if old_key is None:
                     os.environ.pop("SDLC_ACTOR_PROOF_KEY", None)
