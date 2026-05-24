@@ -6,8 +6,10 @@ import hashlib
 import json
 import os
 import re
+import signal
 import subprocess
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -20,6 +22,9 @@ SECRET_PATTERNS = [
     re.compile(r"ASIA[0-9A-Z]{16}"),
     re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}"),
     re.compile(r"gh[pousr]_[A-Za-z0-9_]{20,}"),
+]
+QUOTED_SECRET_PATTERNS = [
+    re.compile(r"(?i)((?:\"|')?(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)(?:\"|')?\s*[:=]\s*)([\"'])(.*?)(\2)"),
 ]
 
 SUBPROCESS_ENV_ALLOWLIST = {
@@ -101,6 +106,8 @@ def append_jsonl(path: Path, data: dict[str, Any]) -> None:
 
 def redact_secrets(text: str) -> str:
     redacted = text
+    for pattern in QUOTED_SECRET_PATTERNS:
+        redacted = pattern.sub(r"\1\2[REDACTED]\4", redacted)
     for pattern in SECRET_PATTERNS:
         if pattern.groups >= 3:
             redacted = pattern.sub(r"\1\2[REDACTED]", redacted)
@@ -176,6 +183,28 @@ def run_cmd(
     max_output_chars: int = 1_000_000,
     env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
+    def _terminate_process_tree(proc: subprocess.Popen[bytes], *, pgid: int | None = None, grace_seconds: float = 0.25) -> None:
+        if os.name == "posix":
+            if pgid is None:
+                try:
+                    pgid = os.getpgid(proc.pid)
+                except OSError:
+                    return
+            if pgid == os.getpgrp():
+                return
+            try:
+                os.killpg(pgid, signal.SIGTERM)
+                time.sleep(grace_seconds)
+            except OSError:
+                return
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except OSError:
+                pass
+            return
+        if proc.poll() is None:
+            proc.kill()
+
     def _read_limited(handle: Any) -> tuple[str, bool]:
         handle.seek(0)
         data = handle.read(max_output_chars + 1)
@@ -194,11 +223,18 @@ def run_cmd(
                 stdout=stdout,
                 stderr=stderr,
                 env=env if env is not None else sanitized_subprocess_env(),
+                start_new_session=(os.name == "posix"),
             )
+            process_group_id: int | None = None
+            if os.name == "posix":
+                try:
+                    process_group_id = os.getpgid(proc.pid)
+                except OSError:
+                    process_group_id = None
             try:
                 proc.communicate(input=input_text.encode("utf-8") if input_text is not None else None, timeout=timeout)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                _terminate_process_tree(proc, pgid=process_group_id)
                 proc.communicate()
                 out, out_truncated = _read_limited(stdout)
                 err, err_truncated = _read_limited(stderr)
@@ -211,6 +247,7 @@ def run_cmd(
                     "stderr_truncated": err_truncated,
                     "max_output_chars": max_output_chars,
                 }
+            _terminate_process_tree(proc, pgid=process_group_id)
             out, out_truncated = _read_limited(stdout)
             err, err_truncated = _read_limited(stderr)
             return {

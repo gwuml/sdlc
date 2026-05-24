@@ -596,8 +596,8 @@ def execute_redteam_workers(
     active_worker: str | None = None
     active_round: int | None = None
 
-    redteam_before = _repo_snapshot(repo, include_run_artifacts=False) if execute else {}
-    redteam_journal = _MutationJournal(repo, redteam_before, include_run_artifacts=False) if execute else None
+    redteam_before = _repo_snapshot(repo, include_run_artifacts=True) if execute else {}
+    redteam_journal = _MutationJournal(repo, redteam_before, include_run_artifacts=True) if execute else None
     mutation_violations: list[str] = []
 
     def worker_timeout_remaining() -> tuple[int | None, str]:
@@ -792,7 +792,7 @@ def execute_redteam_workers(
             emit_progress("redteam.round_started", round=round_number, workers=workers)
             ledger.event("redteam.round_started", round=round_number, workers=workers, parallel_per_round_enabled=parallel_enabled)
             if execute:
-                redteam_before = _repo_snapshot(repo, include_run_artifacts=False)
+                redteam_before = _repo_snapshot(repo, include_run_artifacts=True)
                 if redteam_journal is not None:
                     redteam_journal.reset(redteam_before)
             if parallel_enabled:
@@ -809,8 +809,8 @@ def execute_redteam_workers(
                     emit_progress("redteam.worker_started", worker=worker, round=round_number, timeout_seconds=effective_timeout, timeout_scope=timeout_scope)
                 if runnable:
                     active_worker = f"parallel-round-{round_number}"
-                    batch_before = _repo_snapshot(repo, include_run_artifacts=False)
-                    batch_journal = _MutationJournal(repo, batch_before, include_run_artifacts=False)
+                    batch_before = _repo_snapshot(repo, include_run_artifacts=True)
+                    batch_journal = _MutationJournal(repo, batch_before, include_run_artifacts=True)
                     batch_journal.start()
                     outcomes: list[tuple[str, int, WorkerResult, list[str]]] = []
                     try:
@@ -823,13 +823,13 @@ def execute_redteam_workers(
                                 outcomes.append(future.result())
                     finally:
                         journal_changes = batch_journal.stop()
-                    changed = sorted(set(_repo_mutations(repo, batch_before, include_run_artifacts=False) + journal_changes))
+                    changed = sorted(set(_repo_mutations(repo, batch_before, include_run_artifacts=True) + journal_changes))
                     if changed:
                         mutation_violations.extend(changed)
                         ledger.event("redteam.worker_policy_violation", workers=[item[0] for item in runnable], round=round_number, mutated_paths=changed)
                     for worker, worker_round, result, audit_mutations in outcomes:
                         record_worker_result(worker, worker_round, result, audit_mutations)
-                    redteam_before = _repo_snapshot(repo, include_run_artifacts=False)
+                    redteam_before = _repo_snapshot(repo, include_run_artifacts=True)
                     if redteam_journal is not None:
                         redteam_journal.reset(redteam_before)
             else:
@@ -839,7 +839,7 @@ def execute_redteam_workers(
                     adapter = redteam_worker_preflight(worker, round_number)
                     if adapter is None:
                         if execute:
-                            redteam_before = _repo_snapshot(repo, include_run_artifacts=False)
+                            redteam_before = _repo_snapshot(repo, include_run_artifacts=True)
                             if redteam_journal is not None:
                                 redteam_journal.reset(redteam_before)
                         continue
@@ -857,13 +857,13 @@ def execute_redteam_workers(
                             redteam_journal.stop()
                     if execute:
                         journal_changes = redteam_journal.changes() if redteam_journal is not None else []
-                        changed = sorted(set(_repo_mutations(repo, redteam_before, include_run_artifacts=False) + journal_changes))
+                        changed = sorted(set(_repo_mutations(repo, redteam_before, include_run_artifacts=True) + journal_changes))
                         if changed:
                             mutation_violations.extend(changed)
                             ledger.event("redteam.worker_policy_violation", worker=worker, round=round_number, mutated_paths=changed)
                     record_worker_result(worker_name, worker_round, result, audit_mutations)
                     if execute:
-                        redteam_before = _repo_snapshot(repo, include_run_artifacts=False)
+                        redteam_before = _repo_snapshot(repo, include_run_artifacts=True)
                         if redteam_journal is not None:
                             redteam_journal.reset(redteam_before)
             ledger.event("redteam.round_completed", round=round_number)

@@ -429,6 +429,12 @@ def _validate_final_report_gate_completion(store: RunStore, run_id: str, gate: G
         return "Verified manifest does not cover the current final-report control snapshot"
     if not any(isinstance(item, dict) and item.get("path") == "artifacts/attestations/control-snapshots/release-readiness.json" and item.get("sha256") == readiness_snapshot_sha for item in manifest_entries):
         return "Verified manifest does not cover the current release-readiness control snapshot"
+    expected_release_verdict = final_verdict(store.load_findings(run_id), store.load_plan(run_id))
+    if readiness_payload.get("release_verdict") != expected_release_verdict:
+        return (
+            "Final report readiness evidence release_verdict does not match current final verdict: "
+            f"{readiness_payload.get('release_verdict')} != {expected_release_verdict}"
+        )
     return None
 
 
@@ -2669,11 +2675,12 @@ def _release_readiness_payload(repo: Path, plan: RunPlan, findings: list[Finding
             "release_state": release_state,
             "reasons": reasons,
         })
+    local_verdict = final_verdict(findings, plan)
     return {
         "schema_version": 1,
         "run_id": plan.run_id,
-        "local_verdict": final_verdict(findings, plan),
-        "release_verdict": "GO" if not errors else "NO_GO",
+        "local_verdict": local_verdict,
+        "release_verdict": local_verdict if not errors else "NO_GO",
         "release_satisfied": not errors,
         "blockers": errors,
         "gate_readiness": gate_readiness,

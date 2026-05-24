@@ -30,7 +30,7 @@ from sdlc.models import Finding, GateState, invalid_findings, open_findings
 from sdlc.pipeline import DEFAULT_GATES
 from sdlc.prompts import render_redteam_prompt
 from sdlc.reporting import build_report
-from sdlc.util import git_current_branch, read_json, run_cmd, write_json
+from sdlc.util import git_current_branch, read_json, redact_secrets, run_cmd, write_json
 from sdlc.validation import validate_json_schema
 
 
@@ -1603,6 +1603,41 @@ class CoreTests(unittest.TestCase):
             status="ACCEPTED",
         )
         self.assertEqual(final_verdict([finding]), "GO_WITH_ACCEPTED_RESIDUAL_RISKS")
+
+    def test_release_readiness_preserves_residual_risk_verdict(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            run_id = "readiness-residual"
+            self.assertEqual(main(["--repo", str(repo), "init"]), 0)
+            self.assertEqual(main(["--repo", str(repo), "plan", "Residual readiness", "--run-id", run_id]), 0)
+            store = RunStore(repo)
+            plan = store.load_plan(run_id)
+            for gate in plan.gates:
+                if gate.id == "deploy_rollout_postdeploy":
+                    gate.state = "SKIPPED"
+                    gate.verdict = "SKIPPED"
+                else:
+                    gate.state = "GO"
+                    gate.verdict = "GO"
+                    gate.evidence = ["evidence.md"]
+            store.save_plan(plan)
+            finding = Finding(
+                id="HIGH-ACCEPTED",
+                severity="HIGH",
+                title="Accepted severe finding",
+                evidence=["human accepted residual risk reason"],
+                impact="Residual risk remains.",
+                required_fix="Track the accepted risk.",
+                owner="human_security_owner",
+                status="ACCEPTED",
+                closed_by="human_security_owner",
+            )
+            store.save_findings(run_id, [finding])
+            with mock.patch.object(cli_module, "_release_readiness_errors", return_value=[]):
+                readiness = cli_module._release_readiness_payload(repo, store.load_plan(run_id), store.load_findings(run_id))
+            self.assertTrue(readiness["release_satisfied"])
+            self.assertEqual(readiness["local_verdict"], "GO_WITH_ACCEPTED_RESIDUAL_RISKS")
+            self.assertEqual(readiness["release_verdict"], "GO_WITH_ACCEPTED_RESIDUAL_RISKS")
 
     def test_report_preserves_residual_risk_release_verdict(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3593,6 +3628,31 @@ class WorkerCaptureTests(unittest.TestCase):
             self.assertEqual(result["returncode"], 0)
             self.assertEqual(result["stdout"].strip(), "present")
 
+    def test_run_cmd_reaps_background_descendants(self) -> None:
+        if os.name != "posix":
+            self.skipTest("process-group cleanup is POSIX-specific")
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            script = (
+                "import subprocess, sys; "
+                "subprocess.Popen([sys.executable, '-c', "
+                "'import pathlib, time; time.sleep(0.5); pathlib.Path(\"late.txt\").write_text(\"mutated\")'], "
+                "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+                "print('parent done')"
+            )
+            result = run_cmd([sys.executable, "-c", script], repo)
+            self.assertEqual(result["returncode"], 0)
+            time.sleep(0.8)
+            self.assertFalse((repo / "late.txt").exists())
+
+    def test_redact_secrets_handles_quoted_json_values(self) -> None:
+        payload = '{"api_key": "not-redacted-secret-value-123456", "token": "plainsecret1234567890", "nested": {"private_key": "-----BEGIN PRIVATE KEY-----"}}'
+        redacted = redact_secrets(payload)
+        self.assertNotIn("not-redacted-secret-value-123456", redacted)
+        self.assertNotIn("plainsecret1234567890", redacted)
+        self.assertNotIn("-----BEGIN PRIVATE KEY-----", redacted)
+        self.assertIn('"api_key": "[REDACTED]"', redacted)
+
 
 class ScannerEvidenceTests(unittest.TestCase):
     def _install_fake_tool(self, repo: Path, name: str, *, exit_code: int = 0, output: str = "{}\n") -> tuple[Path, str]:
@@ -4486,6 +4546,36 @@ printf '{"verdict":"GO","findings":[]}\\n'
             stderr = result_path.read_text(encoding="utf-8")
             self.assertIn("Permission denied", stderr)
             self.assertEqual(source.read_text(encoding="utf-8"), "# original\n")
+
+    def test_redteam_detects_active_run_artifact_mutation_via_original_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            run_id = "redteam-active-run-mutation"
+            worker_body = f"""#!/bin/sh
+cat >/dev/null
+python - <<'PY'
+import json
+from pathlib import Path
+plan = json.loads(Path('.sdlc/runs/{run_id}/plan.json').read_text(encoding='utf-8'))
+original = Path(plan['repo'])
+(original / '.sdlc' / 'runs' / '{run_id}' / 'final-report.md').write_text('tampered by red-team\\n', encoding='utf-8')
+PY
+printf '{{"verdict":"GO","findings":[]}}\\n'
+"""
+            old_path = self._install_fake_worker(repo, "codex", worker_body)
+            try:
+                self.assertEqual(main(["--repo", str(repo), "init"]), 0)
+                self.assertEqual(main(["--repo", str(repo), "plan", "Detect active run mutation", "--run-id", run_id, "--risk", "low"]), 0)
+                self._allow_worker_network(repo)
+                self.assertNotEqual(main(["--repo", str(repo), "redteam", "execute", run_id, "--workers", "codex", "--rounds", "1", "--execute", "--allow-network"]), 0)
+            finally:
+                os.environ["PATH"] = old_path
+            store = RunStore(repo)
+            gate = next(item for item in store.load_plan(run_id).gates if item.id == "independent_redteam_cross_model")
+            self.assertEqual(gate.verdict, "NO_GO")
+            self.assertIn(".sdlc/runs/redteam-active-run-mutation/final-report.md", gate.notes)
+            summary = (store.run_dir(run_id) / "artifacts" / "redteam_execution_summary.md").read_text(encoding="utf-8")
+            self.assertIn("mutation_violations: .sdlc/runs/redteam-active-run-mutation/final-report.md", summary)
 
     def test_release_validation_reports_interrupted_redteam_execution(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
