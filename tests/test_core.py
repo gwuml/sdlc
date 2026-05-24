@@ -709,6 +709,28 @@ class CoreTests(unittest.TestCase):
             next_payload = read_json(repo / ".sdlc" / "runs" / run_id / "artifacts" / "release" / "next_action.json")
             self.assertFalse(next_payload["release_satisfied"])
 
+    def test_status_overlay_marks_specialized_gate_blockers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            run_id = "status-specialized-blockers"
+            self.assertEqual(main(["--repo", str(repo), "plan", "Status specialized blockers", "--run-id", run_id]), 0)
+            store = RunStore(repo)
+            plan = store.load_plan(run_id)
+            for gate_id in ("security_scans", "evidence_traceability_attestations", "final_report_reaudit"):
+                gate = next(item for item in plan.gates if item.id == gate_id)
+                gate.state = "GO"
+                gate.verdict = "GO"
+                gate.evidence = ["evidence.md"]
+            store.save_plan(plan)
+            readiness = cli_module._release_readiness_payload(repo, store.load_plan(run_id), store.load_findings(run_id))
+            by_gate = {item["gate_id"]: item for item in readiness["gate_readiness"]}
+            self.assertEqual(by_gate["security_scans"]["release_state"], "BLOCKED")
+            self.assertTrue(any("Security scans require" in reason for reason in by_gate["security_scans"]["reasons"]))
+            self.assertEqual(by_gate["evidence_traceability_attestations"]["release_state"], "BLOCKED")
+            self.assertTrue(any("Attestation" in reason for reason in by_gate["evidence_traceability_attestations"]["reasons"]))
+            self.assertEqual(by_gate["final_report_reaudit"]["release_state"], "BLOCKED")
+            self.assertTrue(any("Final report" in reason for reason in by_gate["final_report_reaudit"]["reasons"]))
+
     def test_agents_plan_and_execute_six_role_tasks_dry_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

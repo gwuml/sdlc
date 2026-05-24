@@ -2647,9 +2647,13 @@ def _persist_release_readiness(run_dir: Path, run_id: str, readiness: dict[str, 
 def _release_readiness_payload(repo: Path, plan: RunPlan, findings: list[Finding]) -> dict[str, object]:
     store = RunStore(repo)
     errors = _release_readiness_errors(store, plan, findings)
+    run_dir = store.run_dir(plan.run_id)
+    events = _load_run_events(run_dir)
     gate_readiness = []
     for gate in sorted(plan.gates, key=lambda item: item.order):
         reasons = [error for error in errors if f"Gate {gate.id} " in error or error.startswith(f"{gate.id} ")]
+        reasons.extend(_direct_gate_release_reasons(store, plan, gate, events))
+        reasons = list(dict.fromkeys(reasons))
         if gate.state == "SKIPPED" and _skipped_gate_valid(gate, plan):
             release_state = "SKIPPED_VALID"
         elif reasons:
@@ -2674,6 +2678,35 @@ def _release_readiness_payload(repo: Path, plan: RunPlan, findings: list[Finding
         "blockers": errors,
         "gate_readiness": gate_readiness,
     }
+
+
+def _direct_gate_release_reasons(store: RunStore, plan: RunPlan, gate: GateState, events: list[dict[str, object]]) -> list[str]:
+    if gate.state == "SKIPPED" or not _gate_satisfied(gate, plan):
+        return []
+    run_dir = store.run_dir(plan.run_id)
+    reasons: list[str] = []
+    release_evidence_error = _validate_release_gate_evidence(store.repo, run_dir, gate, gate.verdict or "", gate.evidence)
+    if release_evidence_error:
+        reasons.append(release_evidence_error)
+    security_error = _validate_security_gate_completion(store, plan.run_id, gate, gate.verdict or "", _latest_gate_actor(events, gate.id), gate.notes)
+    if security_error:
+        reasons.append(security_error)
+    redteam_error = _validate_redteam_gate_completion(store, plan, gate, gate.verdict or "", gate.evidence)
+    if redteam_error:
+        reasons.append(redteam_error)
+    deploy_error = _validate_deploy_gate_completion(store, plan, gate, gate.verdict or "")
+    if deploy_error:
+        reasons.append(deploy_error)
+    git_provenance_error = _validate_git_provenance_gate_completion(store, plan, gate, gate.verdict or "", gate.evidence)
+    if git_provenance_error:
+        reasons.append(git_provenance_error)
+    attestation_error = _validate_attestation_gate_completion(store, plan, gate, gate.verdict or "", gate.evidence)
+    if attestation_error:
+        reasons.append(attestation_error)
+    final_report_error = _validate_final_report_gate_completion(store, plan.run_id, gate, gate.verdict or "", gate.evidence)
+    if final_report_error:
+        reasons.append(final_report_error)
+    return reasons
 
 
 def _recommend_next_action(plan: RunPlan, findings: list[Finding], readiness: dict[str, object]) -> dict[str, object]:
