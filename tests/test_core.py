@@ -544,6 +544,18 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(_ledger_integrity_errors(run_dir), [])
             self.assertNotEqual(main(["--repo", str(repo), "ledger", "seal-legacy", run_id, "--reason", "duplicate boundary"]), 0)
 
+    def test_ledger_event_kwargs_are_recursively_redacted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_id = "ledger-event-redact"
+            run_dir = Path(tmp) / ".sdlc" / "runs" / run_id
+            field = "api" + "_key"
+            marker = "sec" + "ret"
+            value = "plain" + marker + "1234567890"
+            Ledger(run_dir, run_id).event("test.event", payload={field: value, "nested": [{"tok" + "en": value}]})
+            text = (run_dir / "events.jsonl").read_text(encoding="utf-8")
+            self.assertNotIn(value, text)
+            self.assertIn("[REDACTED]", text)
+
     def test_audit_copy_can_verify_ledger_hash_chain_without_origin_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / "repo"
@@ -589,6 +601,24 @@ class CoreTests(unittest.TestCase):
                 require_origin=False,
             )
             self.assertIsNone(audit_error)
+
+    def test_release_validation_detects_attested_plan_findings_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            run_id = "snapshot-drift"
+            self.assertEqual(main(["--repo", str(repo), "init"]), 0)
+            self.assertEqual(main(["--repo", str(repo), "plan", "Snapshot drift", "--run-id", run_id]), 0)
+            store = RunStore(repo)
+            run_dir = store.run_dir(run_id)
+            snapshot_dir = run_dir / "artifacts" / "attestations" / "control-snapshots"
+            snapshot_dir.mkdir(parents=True)
+            shutil.copy2(run_dir / "plan.json", snapshot_dir / "plan.json")
+            shutil.copy2(run_dir / "findings.json", snapshot_dir / "findings.json")
+            plan = store.load_plan(run_id)
+            plan.gates[0].state = "GO"
+            store.save_plan(plan)
+            errors = _release_readiness_errors(store, store.load_plan(run_id), store.load_findings(run_id))
+            self.assertIn("Live plan.json diverges from attested control snapshot", errors)
 
     def test_audit_copy_can_verify_closure_artifacts_without_origin_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2632,6 +2662,23 @@ class FindingLifecycleTests(unittest.TestCase):
             self.assertNotEqual(main(["--repo", str(repo), "gate", "complete", run_id, "security_scans", "--verdict", "GO", "--actor", "agent_8_cybersecurity_engineer", "--evidence", summary_arg]), 0)
             self.assertNotEqual(main(["--repo", str(repo), "gate", "complete", run_id, "security_scans", "--verdict", "GO_WITH_ACCEPTED_RESIDUAL_RISKS", "--actor", "agent_8_cybersecurity_engineer", "--evidence", summary_arg, "--notes", "residual risk reason: network scanner blocked by policy and manually adjudicated"]), 0)
             self.assertEqual(main(["--repo", str(repo), "gate", "complete", run_id, "security_scans", "--verdict", "GO_WITH_ACCEPTED_RESIDUAL_RISKS", "--actor", "human_security_owner", "--evidence", summary_arg, "--notes", "residual risk reason: network scanner blocked by policy and manually adjudicated"]), 0)
+            plan = store.load_plan(run_id)
+            gate = next(item for item in plan.gates if item.id == "security_scans")
+            gate.notes = "residual risk reason: mutated after approval"
+            store.save_plan(plan)
+            events = cli_module._load_run_events(store.run_dir(run_id))
+            self.assertEqual(
+                cli_module._validate_security_gate_completion(
+                    store,
+                    run_id,
+                    gate,
+                    gate.verdict or "",
+                    cli_module._latest_gate_actor(events, "security_scans"),
+                    gate.notes,
+                    require_event_binding=True,
+                ),
+                "Accepted residual risk approval must match the canonical gate completion actor, verdict, and notes",
+            )
 
     def test_security_scan_gate_rejects_tampered_summary_verdict(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5246,6 +5293,19 @@ class DeployGateTests(unittest.TestCase):
             self.assertIs(record["accepted_residual_risks"][-1]["actor_proof_verified"], True)
             gate = next(item for item in RunStore(repo).load_plan(run_id).gates if item.id == "deploy_rollout_postdeploy")
             self.assertEqual(gate.verdict, "GO_WITH_ACCEPTED_RESIDUAL_RISKS")
+
+    def test_production_rollback_execute_requires_release_approval_gates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            run_id = "deploy-rollback-gated"
+            self.assertEqual(main(["--repo", str(repo), "init"]), 0)
+            self.assertEqual(main(["--repo", str(repo), "plan", "Rollback gated", "--run-id", run_id, "--production-rollout-allowed"]), 0)
+            rollback_command = f"{sys.executable} -c \"print('rollback ok')\""
+            self.assertEqual(main(["--repo", str(repo), "deploy", "plan", run_id, "--env", "production", "--rollback-command", rollback_command]), 0)
+            self.assertNotEqual(main(["--repo", str(repo), "deploy", "rollback", run_id, "--env", "production", "--execute", "--command", rollback_command]), 0)
+            record = read_json(RunStore(repo).run_dir(run_id) / "artifacts" / "deploy" / "production.json")
+            self.assertIn("rollback_rejection", record)
+            self.assertNotIn("rollback_returncode", record)
 
     def test_manual_deploy_gate_go_requires_deploy_record_invariants(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

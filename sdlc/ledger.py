@@ -6,6 +6,7 @@ import json
 import hashlib
 import hmac
 import os
+import re
 import secrets
 import threading
 from contextlib import contextmanager
@@ -32,6 +33,27 @@ def ledger_event_digest(payload: dict[str, Any]) -> str:
     unsigned = {key: value for key, value in payload.items() if key not in {"event_sha256", "ledger_signature"}}
     canonical = json.dumps(unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return sha256_text(canonical)
+
+
+_SENSITIVE_EVENT_KEYS = re.compile(r"(api[_-]?key|token|secret|password|private[_-]?key|credential|authorization)", re.IGNORECASE)
+
+
+def _redact_event_value(value: Any, *, key_hint: str = "") -> Any:
+    if isinstance(value, str):
+        if key_hint and _SENSITIVE_EVENT_KEYS.search(key_hint):
+            return "[REDACTED]"
+        return redact_secrets(value)
+    if isinstance(value, list):
+        return [_redact_event_value(item, key_hint=key_hint) for item in value]
+    if isinstance(value, tuple):
+        return [_redact_event_value(item, key_hint=key_hint) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _redact_event_value(item, key_hint=str(key)) for key, item in value.items()}
+    return value
+
+
+def _redact_event_kwargs(kwargs: Mapping[str, Any]) -> dict[str, Any]:
+    return {str(key): _redact_event_value(value, key_hint=str(key)) for key, value in kwargs.items()}
 
 
 def ledger_event_origin_signature(payload: Mapping[str, object], key: bytes) -> str:
@@ -261,6 +283,7 @@ class Ledger:
 
     def _append_event_locked(self, event: str, **kwargs: Any) -> None:
         sequence, previous = self._next_sequence_and_previous_hash()
+        safe_kwargs = _redact_event_kwargs(kwargs)
         payload = {
             "ts": now_iso(),
             "run_id": self.run_id,
@@ -268,7 +291,7 @@ class Ledger:
             "ledger_schema": LEDGER_EVENT_SCHEMA,
             "ledger_sequence": sequence,
             "prev_event_sha256": previous,
-            **kwargs,
+            **safe_kwargs,
         }
         payload["event_sha256"] = ledger_event_digest(payload)
         origin_signature = self._origin_signature(payload)

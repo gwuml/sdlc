@@ -224,7 +224,16 @@ def _validate_gate_dependencies(plan: RunPlan, gate: GateState, verdict: str) ->
     return None
 
 
-def _validate_security_gate_completion(store: RunStore, run_id: str, gate: GateState, verdict: str, actor: str | None, notes: str) -> str | None:
+def _validate_security_gate_completion(
+    store: RunStore,
+    run_id: str,
+    gate: GateState,
+    verdict: str,
+    actor: str | None,
+    notes: str,
+    *,
+    require_event_binding: bool = False,
+) -> str | None:
     if gate.id != "security_scans" or verdict not in POSITIVE_GATE_VERDICTS:
         return None
     summary = store.run_dir(run_id) / "artifacts" / "security_scan_summary.md"
@@ -269,6 +278,12 @@ def _validate_security_gate_completion(store: RunStore, run_id: str, gate: GateS
     lowered = notes.lower()
     if "residual" not in lowered or "reason" not in lowered:
         return "Accepted residual risk for a NO_GO security scan requires notes containing residual risk and reason"
+    if require_event_binding:
+        completion = _latest_gate_completion_event(events, "security_scans")
+        if completion is None:
+            return "Accepted residual risk for a NO_GO security scan requires a ledger-backed gate completion event"
+        if completion.get("actor") != actor or completion.get("verdict") != verdict or completion.get("notes") != notes:
+            return "Accepted residual risk approval must match the canonical gate completion actor, verdict, and notes"
     return None
 
 
@@ -2704,7 +2719,15 @@ def _direct_gate_release_reasons(store: RunStore, plan: RunPlan, gate: GateState
     release_evidence_error = _validate_release_gate_evidence(store.repo, run_dir, gate, gate.verdict or "", gate.evidence)
     if release_evidence_error:
         reasons.append(release_evidence_error)
-    security_error = _validate_security_gate_completion(store, plan.run_id, gate, gate.verdict or "", _latest_gate_actor(events, gate.id), gate.notes)
+    security_error = _validate_security_gate_completion(
+        store,
+        plan.run_id,
+        gate,
+        gate.verdict or "",
+        _latest_gate_actor(events, gate.id),
+        gate.notes,
+        require_event_binding=True,
+    )
     if security_error:
         reasons.append(security_error)
     redteam_error = _validate_redteam_gate_completion(store, plan, gate, gate.verdict or "", gate.evidence)
@@ -3515,7 +3538,23 @@ def command_deploy(args: argparse.Namespace) -> int:
             actor_proof=args.actor_proof,
         )
     elif args.deploy_command == "rollback":
-        result = rollback_deployment(store, args.run_id, env=args.env, execute=args.execute, command=args.command, evidence=args.evidence)
+        plan = store.load_plan(args.run_id)
+        findings = store.load_findings(args.run_id)
+        release_errors = _release_readiness_errors(
+            store,
+            plan,
+            findings,
+            ignore_gate_ids={"deploy_rollout_postdeploy", "final_report_reaudit"},
+        ) if args.env == "production" else None
+        result = rollback_deployment(
+            store,
+            args.run_id,
+            env=args.env,
+            execute=args.execute,
+            command=args.command,
+            evidence=args.evidence,
+            release_errors=release_errors,
+        )
     else:
         eprint(f"Unknown deploy command: {args.deploy_command}")
         return 2
@@ -3825,6 +3864,7 @@ def _release_readiness_errors(
     )
     active_redteam_audit = audit_workspace_copy and _audit_readonly_worker()
     errors.extend(_ledger_integrity_errors(run_dir, require_origin=not audit_workspace_copy))
+    errors.extend(_control_snapshot_divergence_errors(run_dir))
     if repo_identity_differs:
         if not audit_workspace:
             errors.append(f"Release validation repo mismatch: run plan repo {plan_repo} does not match active repo {repo.resolve(strict=False)}")
@@ -3896,7 +3936,15 @@ def _release_readiness_errors(
         git_context_error = _validate_git_context_gate_release(plan, repo, run_dir, gate)
         if git_context_error:
             errors.append(git_context_error)
-        security_error = _validate_security_gate_completion(store, plan.run_id, gate, gate.verdict or "", _latest_gate_actor(events, gate.id), gate.notes)
+        security_error = _validate_security_gate_completion(
+            store,
+            plan.run_id,
+            gate,
+            gate.verdict or "",
+            _latest_gate_actor(events, gate.id),
+            gate.notes,
+            require_event_binding=True,
+        )
         if security_error:
             errors.append(security_error)
         redteam_error = _validate_redteam_gate_completion(store, plan, gate, gate.verdict or "", gate.evidence)
@@ -3924,6 +3972,54 @@ def _release_readiness_errors(
         } and not _has_gate_completion_event(events, gate.id):
             errors.append(f"Gate {gate.id} lacks ledger-backed completion evidence")
     return errors
+
+
+def _control_snapshot_divergence_errors(run_dir: Path) -> list[str]:
+    snapshot_dir = run_dir / "artifacts" / "attestations" / "control-snapshots"
+    errors: list[str] = []
+    plan_snapshot = snapshot_dir / "plan.json"
+    findings_snapshot = snapshot_dir / "findings.json"
+    if plan_snapshot.exists():
+        live_plan = run_dir / "plan.json"
+        if not live_plan.exists():
+            errors.append("Live plan.json is missing while an attested control snapshot exists")
+        else:
+            try:
+                live_payload = _release_snapshot_plan_payload(read_json(live_plan, {}))
+                snapshot_payload = _release_snapshot_plan_payload(read_json(plan_snapshot, {}))
+                if live_payload != snapshot_payload:
+                    errors.append("Live plan.json diverges from attested control snapshot")
+            except OSError:
+                errors.append("Unable to compare live plan.json with attested control snapshot")
+    if findings_snapshot.exists():
+        live_findings = run_dir / "findings.json"
+        if not live_findings.exists():
+            errors.append("Live findings.json is missing while an attested control snapshot exists")
+        else:
+            try:
+                if _digest_file(live_findings) != _digest_file(findings_snapshot):
+                    errors.append("Live findings.json diverges from attested control snapshot")
+            except OSError:
+                errors.append("Unable to compare live findings.json with attested control snapshot")
+    return errors
+
+
+def _release_snapshot_plan_payload(payload: object) -> object:
+    if not isinstance(payload, dict):
+        return payload
+    cloned = json.loads(json.dumps(payload, sort_keys=True))
+    gates = cloned.get("gates")
+    if isinstance(gates, list):
+        post_snapshot_gate_ids = {
+            "deploy_rollout_postdeploy",
+            "evidence_traceability_attestations",
+            "final_report_reaudit",
+        }
+        cloned["gates"] = [
+            gate for gate in gates
+            if not (isinstance(gate, dict) and gate.get("id") in post_snapshot_gate_ids)
+        ]
+    return cloned
 
 
 def _git_source_provenance_required_for_release(plan: RunPlan, *, audit_workspace: bool) -> bool:
@@ -4104,6 +4200,13 @@ def _latest_gate_actor(events: list[dict[str, object]], gate_id: str) -> str | N
     for event in reversed(events):
         if event.get("gate") == gate_id and isinstance(event.get("actor"), str):
             return str(event.get("actor"))
+    return None
+
+
+def _latest_gate_completion_event(events: list[dict[str, object]], gate_id: str) -> dict[str, object] | None:
+    for event in reversed(events):
+        if event.get("gate") == gate_id and event.get("event") in {"gate.manually_completed", "gate.completed"}:
+            return event
     return None
 
 

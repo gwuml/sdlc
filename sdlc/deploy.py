@@ -285,8 +285,10 @@ def rollback_deployment(
     execute: bool,
     command: str | None = None,
     evidence: list[str] | None = None,
+    release_errors: list[str] | None = None,
 ) -> dict[str, Any]:
     plan = store.load_plan(run_id)
+    findings = store.load_findings(run_id)
     run_dir = store.run_dir(run_id)
     repo = Path(plan.repo)
     ledger = Ledger(run_dir, run_id)
@@ -310,6 +312,14 @@ def rollback_deployment(
         _update_deploy_gate(store, plan, run_id, env, artifact)
         ledger.event("deploy.rollback_rejected", env=env, reason=reason, record_sha256=_artifact_sha256(run_dir, artifact), evidence=[artifact])
         return {"status": "REJECTED", "reason": reason, "artifact": artifact, "record": record}
+    if execute:
+        rejection = _production_execute_rejection(plan, findings, env, record, release_errors=release_errors)
+        if rejection:
+            record["rollback_rejection"] = rejection
+            artifact = _write_deploy_record(ledger, env, record, event="deploy.rollback_rejected_artifact")
+            _update_deploy_gate(store, plan, run_id, env, artifact)
+            ledger.event("deploy.rollback_rejected", env=env, reason=rejection, record_sha256=_artifact_sha256(run_dir, artifact), evidence=[artifact])
+            return {"status": "REJECTED", "reason": rejection, "artifact": artifact, "record": record}
     if not execute:
         record["rollback_status"] = "DRY_RUN"
         record["rollback_readiness_status"] = "RECORDED"
