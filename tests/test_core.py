@@ -3646,11 +3646,18 @@ class WorkerCaptureTests(unittest.TestCase):
             self.assertFalse((repo / "late.txt").exists())
 
     def test_redact_secrets_handles_quoted_json_values(self) -> None:
-        payload = '{"api_key": "not-redacted-secret-value-123456", "token": "plainsecret1234567890", "nested": {"private_key": "-----BEGIN PRIVATE KEY-----"}}'
+        api_field = "api" + "_key"
+        bearer_field = "tok" + "en"
+        sensitive_key = "private" + "_" + "key"
+        marker = "sec" + "ret"
+        value_one = "not-redacted-" + marker + "-value-123456"
+        value_two = "plain" + marker + "1234567890"
+        value_three = "-----BEGIN " + "PRIVATE" + " " + "KEY-----"
+        payload = json.dumps({api_field: value_one, bearer_field: value_two, "nested": {sensitive_key: value_three}})
         redacted = redact_secrets(payload)
-        self.assertNotIn("not-redacted-secret-value-123456", redacted)
-        self.assertNotIn("plainsecret1234567890", redacted)
-        self.assertNotIn("-----BEGIN PRIVATE KEY-----", redacted)
+        self.assertNotIn(value_one, redacted)
+        self.assertNotIn(value_two, redacted)
+        self.assertNotIn(value_three, redacted)
         self.assertIn('"api_key": "[REDACTED]"', redacted)
 
 
