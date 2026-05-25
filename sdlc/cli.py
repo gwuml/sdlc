@@ -2773,7 +2773,9 @@ def _release_readiness_payload(repo: Path, plan: RunPlan, findings: list[Finding
             "reasons": reasons,
         })
     local_verdict = final_verdict(findings, plan)
-    release_satisfied = not errors
+    if local_verdict == "NO_GO" and not any("Local final verdict is NO_GO" in error for error in errors):
+        errors.insert(0, "Local final verdict is NO_GO; release gates are not satisfied.")
+    release_satisfied = local_verdict != "NO_GO" and not errors
     authority_mode = "RELEASE_CANDIDATE_ADVISORY" if release_satisfied else "ADVISORY"
     return {
         "schema_version": 1,

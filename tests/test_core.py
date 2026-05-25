@@ -1767,6 +1767,31 @@ Optional:
             self.assertIn("Verdict: **GO_WITH_ACCEPTED_RESIDUAL_RISKS**", report)
             self.assertIn("- Release verdict: GO_WITH_ACCEPTED_RESIDUAL_RISKS", report)
 
+    def test_no_go_report_never_claims_release_satisfied_without_readiness_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            run_id = "report-no-go-unsatisfied"
+            self.assertEqual(main(["--repo", str(repo), "init"]), 0)
+            self.assertEqual(main(["--repo", str(repo), "plan", "NO_GO clarity", "--run-id", run_id]), 0)
+            store = RunStore(repo)
+            plan = store.load_plan(run_id)
+            gate = next(item for item in plan.gates if item.id == "implementation")
+            gate.state = "FIX_REQUIRED"
+            gate.verdict = "NO_GO"
+            gate.evidence = ["evidence.md"]
+            store.save_plan(plan)
+
+            readiness = cli_module._release_readiness_payload(repo, store.load_plan(run_id), store.load_findings(run_id))
+            self.assertFalse(readiness["release_satisfied"])
+            self.assertEqual(readiness["release_verdict"], "NO_GO")
+            self.assertTrue(any("Local final verdict is NO_GO" in blocker for blocker in readiness["blockers"]))
+
+            report = build_report(repo, run_id)
+            self.assertIn("- Release verdict: NO_GO", report)
+            self.assertIn("- Release satisfied: false", report)
+            self.assertIn("- Blocking gates: 1", report)
+            self.assertIn("Local final verdict is NO_GO", report)
+
     def test_report_escapes_finding_markdown_table_cells(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)

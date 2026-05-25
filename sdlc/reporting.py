@@ -16,10 +16,21 @@ def build_report(repo: Path, run_id: str, *, verdict_override: str | None = None
     findings = store.load_findings(run_id)
     computed_verdict = final_verdict(findings, plan)
     verdict = verdict_override or computed_verdict
-    readiness_errors = readiness_errors or []
-    release_satisfied = not readiness_errors
-    release_verdict = computed_verdict if release_satisfied else "NO_GO"
+    release_blockers = list(readiness_errors or [])
+    if verdict == "NO_GO" and not any("Local final verdict is NO_GO" in item for item in release_blockers):
+        release_blockers.insert(0, "Local final verdict is NO_GO; release gates are not satisfied.")
+    release_satisfied = verdict != "NO_GO" and not release_blockers
+    release_verdict = verdict if release_satisfied else "NO_GO"
     authority_mode = "RELEASE_CANDIDATE_ADVISORY" if release_satisfied else "ADVISORY"
+    blocking_gates = [
+        gate
+        for gate in plan.gates
+        if gate.verdict == "NO_GO" or gate.state in {"NO_GO", "FIX_REQUIRED", "BLOCKED"}
+    ]
+    blocking_gate_rows = "\n".join(
+        f"| {_md_cell(gate.id)} | {_md_cell(gate.state)} | {_md_cell(gate.verdict or '')} | {_md_cell(gate.notes or '')} |"
+        for gate in blocking_gates
+    ) or "| - | - | - | No blocking gates recorded |"
 
     gate_rows = "\n".join(
         f"| {gate.order:02d} | {_md_cell(gate.id)} | {_md_cell(gate.owner)} | {_md_cell(gate.state)} | {_md_cell(gate.verdict or '')} | {_md_cell(', '.join(gate.evidence))} |"
@@ -57,16 +68,23 @@ This report only claims that recorded gates and evidence exist. It does **not** 
 - Local final verdict: {computed_verdict}
 - Release verdict: {release_verdict}
 - Release satisfied: {str(release_satisfied).lower()}
-- Readiness blockers: {len(readiness_errors)}
+- Readiness blockers: {len(release_blockers)}
+- Blocking gates: {len(blocking_gates)}
 - Open findings: {len(open_findings(findings))}
 - Important: local gate `GO` does not imply release-satisfied.
-{_readiness_block(report_errors=readiness_errors)}
+{_readiness_block(report_errors=release_blockers)}
 
 ## Gate status
 
 | # | Gate | Owner | State | Verdict | Evidence |
 |---:|---|---|---|---|---|
 {gate_rows}
+
+## Blocking Gates
+
+| Gate | State | Verdict | Notes |
+|---|---|---|---|
+{blocking_gate_rows}
 
 ## Findings
 
