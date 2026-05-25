@@ -20,15 +20,16 @@ from pathlib import Path
 import sdlc.cli as cli_module
 import sdlc.adapters as adapters_module
 from sdlc.adapters import ADAPTERS, ClaudeAdapter, CodexAdapter, GeminiAdapter, KimiAdapter, adapter_from_policy
+from sdlc.audit_runtime import audit_isolation_preflight
 from sdlc.classifier import classify_feature
 from sdlc.attestations import _verify_manifest_entries
 from sdlc.cli import _final_report_attestation_event_error, _ledger_event_records_after_sequence, _ledger_integrity_errors, _release_git_provenance_source_error, _release_readiness_errors, _validate_final_report_gate_completion, _validate_git_provenance_payload, _validate_non_placeholder_evidence, main
-from sdlc.engine import RunStore, _create_audit_workspace, _make_tree_writable, _parse_worker_findings, _repo_snapshot as engine_repo_snapshot, _worker_declared_verdict, final_verdict, run_dry_gates
+from sdlc.engine import RunStore, _create_audit_workspace, _external_hard_audit_isolation_required, _make_tree_writable, _parse_worker_findings, _prompt_binding_from_text, _repo_snapshot as engine_repo_snapshot, _worker_attested_review, _worker_declared_verdict, final_verdict, run_dry_gates
 from sdlc.ledger import LEDGER_ARTIFACT_SCHEMA, LEDGER_EVENT_SCHEMA, Ledger, canonical_artifact_event, is_canonical_artifact_event, is_canonical_ledger_event, is_origin_authenticated_ledger_event, ledger_event_digest
 from sdlc.memory import export_memory
 from sdlc.models import Finding, GateState, invalid_findings, open_findings
 from sdlc.pipeline import DEFAULT_GATES
-from sdlc.prompts import render_redteam_prompt
+from sdlc.prompts import redteam_prompt_binding_sha256, render_redteam_prompt
 from sdlc.reporting import build_report
 from sdlc.util import git_current_branch, read_json, redact_secrets, run_cmd, write_json
 from sdlc.validation import validate_json_schema
@@ -1853,11 +1854,137 @@ class CoreTests(unittest.TestCase):
             self.assertIn("whose only evidence is that the active run's authoritative", prompt)
             self.assertIn("would allow a release", prompt)
             self.assertIn("TMPDIR=", prompt)
+            self.assertIn("prompt compliance is only a secondary control", prompt)
+            self.assertIn("Write audit notes and test scratch data only to the orchestrator-provided temp directory", prompt)
             self.assertIn('cd "${SDLC_WORKER_REPO:?orchestrator_repo_not_set}"', prompt)
             self.assertIn('TMPDIR="${TMPDIR:?orchestrator_TMPDIR_not_set}"', prompt)
             self.assertIn("python -m sdlc validate --run-id redteam-prompt-scope --release --audit-workspace", prompt)
             self.assertNotIn("TMPDIR=$PWD/.sdlc-redteam-tmp", prompt)
             self.assertIn("not from an older `worker-results/**/stdout.txt` transcript", prompt)
+
+    def test_high_risk_external_hard_isolation_cannot_be_policy_disabled(self) -> None:
+        plan = type("Plan", (), {"risk_level": "HIGH"})()
+        adapter = type("Adapter", (), {"provider": "openai"})()
+        self.assertTrue(_external_hard_audit_isolation_required(plan, {
+            "external_hard_source_isolation_required": False,
+        }, adapter))
+
+    def test_macos_sandbox_preflight_is_advisory_not_hard(self) -> None:
+        result = audit_isolation_preflight(
+            policy={"redteam": {"audit_isolation": {"runtime": "macos_sandbox_exec"}}},
+            repo=Path.cwd(),
+            worker="openai-review",
+            provider="openai",
+            prompt_sha256="abc",
+            allow_network=True,
+        )
+        self.assertTrue(result.advisory_isolation)
+        self.assertFalse(result.hard_isolation)
+        self.assertEqual(result.method, "macos_sandbox_exec")
+
+    def test_unsafe_credential_mount_disqualifies_container_isolation(self) -> None:
+        home = Path(os.environ.get("HOME", "")).expanduser()
+        policy = {
+            "redteam": {
+                "audit_isolation": {
+                    "runtime": "container",
+                    "container_engine": "docker",
+                    "container_image": "sdlc-test-image",
+                    "mounts": [{"host": str(home / ".ssh"), "container": "/workspace/ssh"}],
+                }
+            }
+        }
+        with mock.patch("sdlc.audit_runtime.shutil.which", return_value="/usr/bin/docker"), mock.patch(
+            "sdlc.audit_runtime.run_cmd",
+            return_value={"returncode": 0, "stdout": "ok", "stderr": ""},
+        ):
+            result = audit_isolation_preflight(
+                policy=policy,
+                repo=Path.cwd(),
+                worker="openai-review",
+                provider="openai",
+                prompt_sha256="abc",
+                allow_network=True,
+            )
+        self.assertFalse(result.hard_isolation)
+        self.assertTrue(result.attestation["host_credential_dirs_mounted"])
+        self.assertIn("credential", result.reason)
+
+    def test_container_source_write_probe_failure_blocks_hard_isolation(self) -> None:
+        policy = {
+            "redteam": {
+                "audit_isolation": {
+                    "runtime": "container",
+                    "container_engine": "docker",
+                    "container_image": "sdlc-test-image",
+                }
+            }
+        }
+        with mock.patch("sdlc.audit_runtime.shutil.which", return_value="/usr/bin/docker"), mock.patch(
+            "sdlc.audit_runtime.run_cmd",
+            return_value={"returncode": 42, "stdout": "", "stderr": "writable"},
+        ):
+            result = audit_isolation_preflight(
+                policy=policy,
+                repo=Path.cwd(),
+                worker="openai-review",
+                provider="openai",
+                prompt_sha256="abc",
+                allow_network=True,
+            )
+        self.assertFalse(result.hard_isolation)
+        self.assertTrue(result.attestation["source_write_probe"]["attempted"])
+        self.assertFalse(result.attestation["source_write_probe"]["passed"])
+
+    def test_missing_scoped_auth_env_disqualifies_container_isolation(self) -> None:
+        policy = {
+            "redteam": {
+                "audit_isolation": {
+                    "runtime": "container",
+                    "container_engine": "docker",
+                    "container_image": "sdlc-test-image",
+                    "auth": {"mode": "scoped_env"},
+                    "auth_env": ["SDLC_TEST_MISSING_API_KEY"],
+                }
+            }
+        }
+        old_value = os.environ.pop("SDLC_TEST_MISSING_API_KEY", None)
+        try:
+            with mock.patch("sdlc.audit_runtime.shutil.which", return_value="/usr/bin/docker"), mock.patch(
+                "sdlc.audit_runtime.run_cmd",
+                return_value={"returncode": 0, "stdout": "ok", "stderr": ""},
+            ):
+                result = audit_isolation_preflight(
+                    policy=policy,
+                    repo=Path.cwd(),
+                    worker="openai-review",
+                    provider="openai",
+                    prompt_sha256="abc",
+                    allow_network=True,
+                )
+        finally:
+            if old_value is not None:
+                os.environ["SDLC_TEST_MISSING_API_KEY"] = old_value
+        self.assertFalse(result.hard_isolation)
+        self.assertIn("SDLC_TEST_MISSING_API_KEY", result.reason)
+
+    def test_redteam_prompt_binding_detects_tampered_prompt_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self.assertEqual(main(["--repo", str(repo), "plan", "Prompt binding", "--run-id", "prompt-binding"]), 0)
+            prompt = repo / ".sdlc" / "runs" / "prompt-binding" / "prompts" / "redteam_prompt.md"
+            text = prompt.read_text(encoding="utf-8")
+            binding = redteam_prompt_binding_sha256(text)
+            self.assertEqual(_prompt_binding_from_text(text), binding)
+            tampered = text.replace("Do not edit source repository files.", "You may edit source repository files.")
+            worker_output = json.dumps({
+                "verdict": "GO",
+                "reviewed_run_id": "prompt-binding",
+                "prompt_sha256": binding,
+                "findings": [],
+            })
+            self.assertNotEqual(_prompt_binding_from_text(tampered), binding)
+            self.assertFalse(_worker_attested_review(worker_output, "prompt-binding", _prompt_binding_from_text(tampered)))
 
     def test_deterministic_quality_no_go_on_failing_tests(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3119,6 +3246,118 @@ class WorkerCaptureTests(unittest.TestCase):
         policy["network_allowed"] = True
         write_json(repo / ".sdlc" / "policies" / "default.json", policy)
 
+    def test_prompt_run_executes_prompt_and_validates_required_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            prompt = repo / ".codex" / "prompts" / "review.md"
+            prompt.parent.mkdir(parents=True)
+            prompt.write_text(
+                "\n".join([
+                    "# Review Fixture",
+                    "",
+                    "Create these files under `/tmp/repo`:",
+                    "",
+                    "- `docs/audits/review.md`",
+                    "- `docs/audits/inventory.json`",
+                    "",
+                    "Optional but encouraged:",
+                    "",
+                    "- `docs/audits/optional.md`",
+                    "",
+                ]),
+                encoding="utf-8",
+            )
+            body = (
+                "#!/bin/sh\n"
+                "cat >/dev/null\n"
+                "mkdir -p docs/audits\n"
+                "printf '# Review\\n' > docs/audits/review.md\n"
+                "printf '{\"ok\": true}\\n' > docs/audits/inventory.json\n"
+                "printf 'done\\n'\n"
+            )
+            _script, old_path = self._install_fake_worker(repo, "codex", body)
+            try:
+                result = main([
+                    "--repo",
+                    str(repo),
+                    "prompt",
+                    "run",
+                    str(prompt),
+                    "--run-id",
+                    "prompt-run-fixture",
+                    "--execute",
+                    "--allow-network",
+                    "--no-branch",
+                    "--timeout",
+                    "30",
+                ])
+            finally:
+                os.environ["PATH"] = old_path
+            self.assertEqual(result, 0)
+            self.assertTrue((repo / "docs" / "audits" / "review.md").exists())
+            self.assertEqual(read_json(repo / "docs" / "audits" / "inventory.json")["ok"], True)
+            run_dir = RunStore(repo).run_dir("prompt-run-fixture")
+            progress = read_json(run_dir / "artifacts" / "prompt-run" / "progress.json")
+            phases = [(item["phase"], item["status"]) for item in progress["phases"]]
+            self.assertIn(("deliverable_validation", "GO"), phases)
+            imported = next(item for item in progress["phases"] if item["phase"] == "prompt_import")
+            self.assertEqual(imported["required_outputs"], ["docs/audits/review.md", "docs/audits/inventory.json"])
+            self.assertTrue((run_dir / "final-report.md").exists())
+
+    def test_prompt_run_restores_read_only_repo_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "target"
+            source = Path(tmp) / "source"
+            repo.mkdir()
+            source.mkdir()
+            (source / "evidence.txt").write_text("keep\n", encoding="utf-8")
+            prompt = repo / ".codex" / "prompts" / "review.md"
+            prompt.parent.mkdir(parents=True)
+            prompt.write_text(
+                "\n".join([
+                    "# Review Fixture",
+                    "",
+                    "## Required Output Files",
+                    "",
+                    "- `docs/result.md`",
+                    "",
+                ]),
+                encoding="utf-8",
+            )
+            body = (
+                "#!/bin/sh\n"
+                "cat >/dev/null\n"
+                "target=\"${SDLC_WORKER_READ_ONLY_REPOS%%:*}\"\n"
+                "printf 'bad\\n' > \"$target/new-file.txt\"\n"
+                "mkdir -p docs\n"
+                "printf '# Result\\n' > docs/result.md\n"
+            )
+            _script, old_path = self._install_fake_worker(repo, "codex", body)
+            try:
+                result = main([
+                    "--repo",
+                    str(repo),
+                    "prompt",
+                    "run",
+                    str(prompt),
+                    "--run-id",
+                    "prompt-readonly-fixture",
+                    "--read-only-repo",
+                    str(source),
+                    "--execute",
+                    "--allow-network",
+                    "--no-branch",
+                    "--timeout",
+                    "30",
+                ])
+            finally:
+                os.environ["PATH"] = old_path
+            self.assertNotEqual(result, 0)
+            self.assertFalse((source / "new-file.txt").exists())
+            self.assertEqual((source / "evidence.txt").read_text(encoding="utf-8"), "keep\n")
+            events = self._load_events(RunStore(repo).run_dir("prompt-readonly-fixture"))
+            self.assertTrue(any(event.get("event") == "prompt_run.read_only_repo_violation" for event in events))
+
     def test_engine_snapshot_tracks_control_plane_run_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -3142,6 +3381,115 @@ class WorkerCaptureTests(unittest.TestCase):
             command = CodexAdapter().build_command(prompt, repo, "BUILD")
             self.assertIn("--add-dir", command)
             self.assertTrue(any(str(item).startswith(str(repo / ".sdlc-worker-tmp")) for item in command))
+
+    def test_macos_sandbox_blocks_audit_source_writes(self) -> None:
+        if adapters_module.hard_audit_source_isolation_method() != "macos_sandbox_exec":
+            self.skipTest("macOS sandbox-exec is required for this isolation test")
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            prompt = repo / ".sdlc" / "runs" / "sandbox-run" / "prompts" / "redteam_prompt.md"
+            prompt.parent.mkdir(parents=True)
+            prompt.write_text("audit prompt\n", encoding="utf-8")
+            worker = repo / "worker.sh"
+            source_marker = repo / "source-write.txt"
+            worker.write_text(
+                "#!/bin/sh\n"
+                "cat >/dev/null\n"
+                f"printf blocked > {str(source_marker)!r}\n"
+                "printf temp-ok > \"$TMPDIR/temp-write.txt\"\n"
+                "printf '{\"verdict\":\"GO\",\"findings\":[]}\\n'\n",
+                encoding="utf-8",
+            )
+            worker.chmod(0o755)
+            adapter = adapter_from_policy("openai-review", {
+                "worker_families": {
+                    "openai-review": {
+                        "command": [str(worker)],
+                        "provider": "openai",
+                        "read_only_security_review": True,
+                    }
+                }
+            })
+            self.assertIsNotNone(adapter)
+            setattr(adapter, "_sdlc_hard_audit_isolation_method", "macos_sandbox_exec")
+            result = adapter.run(prompt, repo, "SECURITY_REVIEW_AUDIT_WORKSPACE", execute=True)
+            self.assertTrue(result.executed)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(result.hard_audit_isolation)
+            self.assertTrue(result.advisory_audit_isolation)
+            self.assertEqual(result.advisory_audit_isolation_method, "macos_sandbox_exec")
+            self.assertIn("sandbox-exec", Path(result.command[0]).name)
+            self.assertFalse(source_marker.exists())
+            writable_paths = []
+            for line in str(result.command[2]).splitlines():
+                marker = '(allow file-write* (subpath "'
+                if line.startswith(marker):
+                    writable_paths.append(Path(line.removeprefix(marker).removesuffix('"))')))
+            self.assertTrue(any(not str(path).startswith(str(repo)) for path in writable_paths))
+            self.assertFalse(any((path / "temp-write.txt").exists() for path in writable_paths))
+            self.assertIn('"verdict":"GO"', result.stdout)
+
+    def test_codex_hard_outer_sandbox_disables_nested_sandbox(self) -> None:
+        command = [
+            "codex",
+            "exec",
+            "--cd",
+            "/repo",
+            "--sandbox",
+            "read-only",
+            "--json",
+            "-",
+        ]
+        transformed = adapters_module._external_hard_sandbox_command(command)
+        self.assertIn("--dangerously-bypass-approvals-and-sandbox", transformed)
+        self.assertNotIn("--sandbox", transformed)
+        self.assertNotIn("read-only", transformed)
+        self.assertEqual(transformed[-1], "-")
+
+    def test_macos_sandbox_rejects_writable_source_overlap(self) -> None:
+        if adapters_module.hard_audit_source_isolation_method() != "macos_sandbox_exec":
+            self.skipTest("macOS sandbox-exec is required for this isolation test")
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            with self.assertRaises(OSError):
+                adapters_module._macos_sandbox_exec_command(["sh", "-c", "true"], repo, repo / ".sdlc-worker-tmp")
+
+    def test_process_cleanup_failure_blocks_container_hard_isolation_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            prompt = repo / ".sdlc" / "runs" / "cleanup-run" / "prompts" / "redteam_prompt.md"
+            prompt.parent.mkdir(parents=True)
+            prompt.write_text("audit prompt\n", encoding="utf-8")
+            adapter = adapter_from_policy("local-review", {
+                "worker_families": {
+                    "local-review": {
+                        "command": ["true"],
+                        "provider": "openai",
+                        "read_only_security_review": True,
+                    }
+                }
+            })
+            self.assertIsNotNone(adapter)
+            setattr(adapter, "_sdlc_audit_isolation_config", {
+                "kind": "container",
+                "engine": "/usr/bin/docker",
+                "image": "sdlc-test-image",
+                "network_mode": "none",
+                "auth_env": [],
+                "method": "container:docker",
+            })
+            with mock.patch("sdlc.adapters.run_cmd", return_value={
+                "returncode": 0,
+                "stdout": "{\"verdict\":\"GO\",\"findings\":[]}\n",
+                "stderr": "",
+                "process_tree_cleanup_ok": False,
+            }):
+                result = adapter.run(prompt, repo, "SECURITY_REVIEW_AUDIT_WORKSPACE", execute=True)
+            self.assertTrue(result.executed)
+            self.assertFalse(result.hard_audit_isolation)
+            self.assertIsNone(result.hard_audit_isolation_method)
+            self.assertIsNotNone(result.audit_isolation_attestation)
+            self.assertFalse(result.audit_isolation_attestation["process_cleanup_ok"])
 
     def test_worker_dry_run_captures_outputs_without_execution(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3351,12 +3699,17 @@ class WorkerCaptureTests(unittest.TestCase):
             self.assertTrue(adapter.security_review_write_protected())
 
     def test_configured_local_redteam_worker_requires_declared_write_isolation(self) -> None:
-        unprotected = adapter_from_policy("local-review", {"worker_families": {"local-review": {"command": ["reviewer"]}}})
+        unprotected = adapter_from_policy("local-review", {"worker_families": {"local-review": {"command": ["reviewer"], "provider": "local"}}})
         self.assertIsNotNone(unprotected)
         self.assertFalse(unprotected.security_review_write_protected())
-        protected = adapter_from_policy("local-review", {"worker_families": {"local-review": {"command": ["reviewer"], "read_only_security_review": True}}})
+        protected = adapter_from_policy("local-review", {"worker_families": {"local-review": {"command": ["reviewer"], "provider": "local", "read_only_security_review": True}}})
         self.assertIsNotNone(protected)
         self.assertTrue(protected.security_review_write_protected())
+
+    def test_configured_worker_without_provider_is_not_trusted_as_local(self) -> None:
+        adapter = adapter_from_policy("custom-review", {"worker_families": {"custom-review": {"command": ["reviewer"], "read_only_security_review": True}}})
+        self.assertIsNotNone(adapter)
+        self.assertEqual(adapter.provider, "external-custom")
 
     def test_audit_workspace_precreates_redteam_tmpdir(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3559,7 +3912,7 @@ class WorkerCaptureTests(unittest.TestCase):
             os.environ["SDLC_AUDIT_HARD_SOURCE_ISOLATION"] = "1"
             try:
                 self.assertEqual(main(["--repo", str(repo), "init"]), 0)
-                self.assertEqual(main(["--repo", str(repo), "plan", "Executed no go", "--run-id", run_id, "--risk", "high"]), 0)
+                self.assertEqual(main(["--repo", str(repo), "plan", "Executed no go", "--run-id", run_id, "--risk", "low"]), 0)
                 policy = read_json(repo / ".sdlc" / "policies" / "default.json")
                 policy["redteam"]["allowed_providers"] = ["openai", "google"]
                 write_json(repo / ".sdlc" / "policies" / "default.json", policy)
@@ -4085,6 +4438,47 @@ class RedTeamExecutionTests(unittest.TestCase):
         os.environ["PATH"] = f"{bin_dir}{os.pathsep}{old_path}"
         return old_path
 
+    def _write_fake_container_runtime(self, repo: Path) -> None:
+        bin_dir = repo / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        script = bin_dir / "fake-docker"
+        script.write_text(
+            "#!/usr/bin/env python3\n"
+            "import subprocess, sys\n"
+            "args = sys.argv[1:]\n"
+            "index = 2\n"
+            "while index < len(args):\n"
+            "    item = args[index]\n"
+            "    if item in {'--network', '--workdir', '--mount', '--tmpfs', '--env'}:\n"
+            "        index += 2\n"
+            "    elif item.startswith('-'):\n"
+            "        index += 1\n"
+            "    else:\n"
+            "        break\n"
+            "cmd = args[index + 1:]\n"
+            "if cmd[:2] == ['sh', '-c']:\n"
+            "    print('readonly_ok')\n"
+            "    sys.exit(0)\n"
+            "completed = subprocess.run(cmd, input=sys.stdin.read(), text=True)\n"
+            "sys.exit(completed.returncode)\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+
+    def _configure_fake_container_isolation(self, repo: Path) -> None:
+        for policy_path in (repo / ".sdlc" / "policies").glob("*.json"):
+            policy = read_json(policy_path)
+            policy["network_allowed"] = True
+            policy.setdefault("redteam", {})["audit_isolation"] = {
+                "runtime": "container",
+                "container_engine": "fake-docker",
+                "container_image": "sdlc-test-image",
+                "network_mode": "none",
+                "auth": {"mode": "absent"},
+                "auth_env": [],
+            }
+            write_json(policy_path, policy)
+
     def _allow_worker_network(self, repo: Path) -> None:
         policy = read_json(repo / ".sdlc" / "policies" / "default.json")
         policy["network_allowed"] = True
@@ -4435,7 +4829,7 @@ print(json.dumps({
                 self.assertEqual(main(["--repo", str(repo), "init"]), 0)
                 self.assertEqual(main(["--repo", str(repo), "plan", "Reject unsafe local redteam", "--run-id", run_id, "--risk", "low"]), 0)
                 policy = read_json(repo / ".sdlc" / "policies" / "default.json")
-                policy["worker_families"] = {"local-review": {"command": ["local-reviewer"]}}
+                policy["worker_families"] = {"local-review": {"command": ["local-reviewer"], "provider": "local"}}
                 policy["redteam"]["allowed_providers"] = ["local"]
                 write_json(repo / ".sdlc" / "policies" / "default.json", policy)
                 self._allow_worker_network(repo)
@@ -4489,7 +4883,82 @@ print(json.dumps({
             summary = (run_dir / "artifacts" / "redteam_execution_summary.md").read_text(encoding="utf-8")
             self.assertIn("verdict: NO_GO", summary)
             events = [json.loads(line) for line in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+            self.assertIn("hard_audit_isolated_workers: <none>", summary)
             self.assertTrue(any(event.get("event") == "redteam.worker_rejected" and event.get("reason") == "audit_source_hard_readonly_isolation_unavailable" for event in events))
+            self.assertTrue(any(event.get("event") == "redteam.isolation_preflight_result" and event.get("hard_isolation") is False for event in events))
+
+    def test_container_runtime_records_hard_isolation_attestation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            run_id = "redteam-container-hard-isolation"
+            fake_docker = (
+                "#!/usr/bin/env python3\n"
+                "import os, subprocess, sys\n"
+                "args = sys.argv[1:]\n"
+                "if args[:2] != ['run', '--rm']:\n"
+                "    sys.exit(2)\n"
+                "index = 2\n"
+                "while index < len(args):\n"
+                "    item = args[index]\n"
+                "    if item in {'--network', '--workdir', '--mount', '--tmpfs', '--env'}:\n"
+                "        index += 2\n"
+                "    elif item.startswith('-'):\n"
+                "        index += 1\n"
+                "    else:\n"
+                "        break\n"
+                "cmd = args[index + 1:]\n"
+                "if cmd[:2] == ['sh', '-c']:\n"
+                "    print('readonly_ok')\n"
+                "    sys.exit(0)\n"
+                "data = sys.stdin.read()\n"
+                "completed = subprocess.run(cmd, input=data, text=True)\n"
+                "sys.exit(completed.returncode)\n"
+            )
+            worker = (
+                "#!/bin/sh\n"
+                "cat >/dev/null\n"
+                "printf '{\"verdict\":\"GO\",\"reviewed_run_id\":\"%s\",\"prompt_sha256\":\"unused\",\"findings\":[]}\\n'\n" % run_id
+            )
+            old_path = self._install_fake_worker(repo, "fake-docker", fake_docker)
+            self._install_fake_worker(repo, "external-reviewer", worker)
+            try:
+                self.assertEqual(main(["--repo", str(repo), "init"]), 0)
+                self.assertEqual(main(["--repo", str(repo), "plan", "Container hard isolation", "--run-id", run_id, "--risk", "high"]), 0)
+                policy = read_json(repo / ".sdlc" / "policies" / "default.json")
+                policy["network_allowed"] = True
+                policy["worker_families"] = {
+                    "openai-review": {
+                        "command": ["external-reviewer"],
+                        "provider": "openai",
+                        "read_only_security_review": True,
+                    }
+                }
+                policy["redteam"]["allowed_providers"] = ["openai"]
+                policy["redteam"]["audit_isolation"] = {
+                    "runtime": "container",
+                    "container_engine": "fake-docker",
+                    "container_image": "sdlc-test-image",
+                    "network_mode": "none",
+                    "auth": {"mode": "absent"},
+                    "auth_env": [],
+                }
+                write_json(repo / ".sdlc" / "policies" / "default.json", policy)
+                self.assertEqual(main([
+                    "--repo", str(repo), "redteam", "execute", run_id,
+                    "--workers", "openai-review",
+                    "--rounds", "3",
+                    "--execute", "--allow-network",
+                    "--allow-no-go-exit-zero",
+                ]), 0)
+            finally:
+                os.environ["PATH"] = old_path
+            run_dir = RunStore(repo).run_dir(run_id)
+            summary = (run_dir / "artifacts" / "redteam_execution_summary.md").read_text(encoding="utf-8")
+            self.assertIn("hard_audit_isolated_workers: openai-review@round1:container:fake-docker", summary)
+            self.assertIn("audit_isolation_attestations: artifacts/redteam/round-1-openai-review-runtime-attestation.json", summary)
+            events = [json.loads(line) for line in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+            self.assertTrue(any(event.get("event") == "redteam.worker_hard_audit_isolated" and event.get("method") == "container:fake-docker" for event in events))
+            self.assertTrue(any(event.get("event") == "redteam.isolation_attestation_written" and event.get("hard_isolation") is True for event in events))
 
     def test_redteam_rejects_when_audit_tempdir_is_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4980,9 +5449,10 @@ print(json.dumps({
             old_hard = os.environ.get("SDLC_AUDIT_HARD_SOURCE_ISOLATION")
             os.environ["SDLC_AUDIT_HARD_SOURCE_ISOLATION"] = "1"
             try:
+                self._write_fake_container_runtime(repo)
                 self.assertEqual(main(["--repo", str(repo), "init"]), 0)
                 self.assertEqual(main(["--repo", str(repo), "plan", "Build high risk redteam", "--run-id", run_id, "--risk", "high"]), 0)
-                self._allow_worker_network(repo)
+                self._configure_fake_container_isolation(repo)
                 self.assertEqual(main(["--repo", str(repo), "redteam", "execute", run_id, "--workers", "codex", "--execute", "--allow-network", "--rounds", "3", "--allow-no-go-exit-zero"]), 0)
             finally:
                 os.environ["PATH"] = old_path
@@ -5017,8 +5487,10 @@ print(json.dumps({
             old_hard = os.environ.get("SDLC_AUDIT_HARD_SOURCE_ISOLATION")
             os.environ["SDLC_AUDIT_HARD_SOURCE_ISOLATION"] = "1"
             try:
+                self._write_fake_container_runtime(repo)
                 self.assertEqual(main(["--repo", str(repo), "init"]), 0)
                 self.assertEqual(main(["--repo", str(repo), "plan", "Build high risk redteam", "--run-id", run_id, "--risk", "high"]), 0)
+                self._configure_fake_container_isolation(repo)
                 for policy_path in (repo / ".sdlc" / "policies").glob("*.json"):
                     policy = read_json(policy_path)
                     policy["network_allowed"] = True
@@ -5082,6 +5554,16 @@ class DeployGateTests(unittest.TestCase):
     def _satisfy_prior_release_gates(self, repo: Path, run_id: str, evidence_path: str = "evidence.md") -> None:
         store = RunStore(repo)
         ledger = Ledger(store.run_dir(run_id), run_id)
+        hard_labels = [
+            f"{worker}@round{round_number}:container:docker"
+            for round_number in (1, 2, 3)
+            for worker in ("codex", "gemini")
+        ]
+        isolation_attestations = [
+            f"artifacts/redteam/round-{round_number}-{worker}-runtime-attestation.json"
+            for round_number in (1, 2, 3)
+            for worker in ("codex", "gemini")
+        ]
         redteam_summary = ledger.artifact(
             "artifacts/redteam_execution_summary.md",
             "\n".join([
@@ -5095,6 +5577,8 @@ class DeployGateTests(unittest.TestCase):
                 "unavailable_workers: <none>",
                 "worker_verdicts: codex:GO:round1, gemini:GO:round1, codex:GO:round2, gemini:GO:round2, codex:GO:round3, gemini:GO:round3",
                 "mutation_violations: <none>",
+                "hard_audit_isolated_workers: " + ", ".join(hard_labels),
+                "audit_isolation_attestations: " + ", ".join(isolation_attestations),
                 "parsed_findings: <none>",
                 "verdict: GO",
                 "",
@@ -5105,6 +5589,17 @@ class DeployGateTests(unittest.TestCase):
         for round_number in (1, 2, 3):
             ledger.event("worker.completed", worker="codex", mode=f"REDTEAM_ROUND_{round_number}", executed=True, available=True, returncode=0)
             ledger.event("worker.completed", worker="gemini", mode=f"REDTEAM_ROUND_{round_number}", executed=True, available=True, returncode=0)
+            for worker in ("codex", "gemini"):
+                ledger.event("redteam.worker_hard_audit_isolated", worker=worker, round=round_number, method="container:docker")
+                ledger.artifact(
+                    f"artifacts/redteam/round-{round_number}-{worker}-runtime-attestation.json",
+                    json.dumps({"worker": worker, "round": round_number, "hard_isolation": True, "method": "container:docker"}, indent=2, sort_keys=True) + "\n",
+                    event="redteam.isolation_attestation_written",
+                    worker=worker,
+                    round=round_number,
+                    hard_isolation=True,
+                    method="container:docker",
+                )
         ledger.event(
             "redteam.execution_completed",
             verdict="GO",
@@ -5124,6 +5619,8 @@ class DeployGateTests(unittest.TestCase):
                 {"worker": "gemini", "round": "3", "verdict": "GO", "context_attested": True},
             ],
             mutation_violations=[],
+            hard_isolated_workers=hard_labels,
+            audit_isolation_attestations=isolation_attestations,
             evidence=[redteam_summary],
         )
         scan_summary_text = "Security scan summary\nVerdict: GO\nscanner: policy PASS\n"
@@ -5203,6 +5700,8 @@ class DeployGateTests(unittest.TestCase):
                         {"worker": "gemini", "round": "3", "verdict": "GO", "context_attested": True},
                     ],
                     mutation_violations=[],
+                    hard_isolated_workers=hard_labels,
+                    audit_isolation_attestations=isolation_attestations,
                     evidence=[redteam_summary],
                 )
                 self.assertEqual(main(["--repo", str(repo), "git", "pr", run_id]), 0)

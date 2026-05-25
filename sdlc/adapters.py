@@ -12,11 +12,14 @@ import hashlib
 import os
 import re
 import shutil
+import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .audit_runtime import container_audit_command, is_hard_audit_isolation_method
 from .ledger import Ledger
 from .util import redact_secrets, relpath_under_base, run_cmd, now_iso
 
@@ -37,6 +40,20 @@ WORKER_ENV_ALLOWLIST = {
 }
 
 WORKER_MAX_OUTPUT_CHARS = 8_000_000
+
+
+def _worker_extra_read_dirs(adapter: object) -> list[Path]:
+    raw = getattr(adapter, "_sdlc_extra_read_dirs", [])
+    if not isinstance(raw, list):
+        return []
+    dirs: list[Path] = []
+    for item in raw:
+        try:
+            path = Path(str(item)).resolve(strict=False)
+        except OSError:
+            continue
+        dirs.append(path)
+    return dirs
 
 
 @dataclass
@@ -62,6 +79,11 @@ class WorkerResult:
     stdout_truncated: bool = False
     stderr_truncated: bool = False
     max_output_chars: int | None = None
+    hard_audit_isolation: bool = False
+    hard_audit_isolation_method: str | None = None
+    advisory_audit_isolation: bool = False
+    advisory_audit_isolation_method: str | None = None
+    audit_isolation_attestation: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -84,6 +106,14 @@ class WorkerResult:
         data["stderr_truncated"] = self.stderr_truncated
         if self.max_output_chars is not None:
             data["max_output_chars"] = self.max_output_chars
+        data["hard_audit_isolation"] = self.hard_audit_isolation
+        if self.hard_audit_isolation_method is not None:
+            data["hard_audit_isolation_method"] = self.hard_audit_isolation_method
+        data["advisory_audit_isolation"] = self.advisory_audit_isolation
+        if self.advisory_audit_isolation_method is not None:
+            data["advisory_audit_isolation_method"] = self.advisory_audit_isolation_method
+        if self.audit_isolation_attestation is not None:
+            data["audit_isolation_attestation"] = self.audit_isolation_attestation
         if self.mode is not None:
             data["mode"] = self.mode
         if self.prompt_path is not None:
@@ -116,6 +146,7 @@ class WorkerAdapter:
         run_id = _worker_run_id(prompt_path) or _adhoc_worker_run_id(prompt_path)
         temp_dir = _worker_temp_dir(prompt_path, repo, mode, run_id=run_id)
         _ensure_writable_worker_temp_dir(temp_dir)
+        extra_read_dirs = _worker_extra_read_dirs(self)
         env = _safe_worker_base_env()
         env.update({
             "SDLC_WORKER_EXECUTION": "1",
@@ -130,6 +161,8 @@ class WorkerAdapter:
             env["SDLC_WORKER_RUN_ID"] = run_id
         if _is_audit_workspace_security_review(mode):
             env["SDLC_WORKER_AUDIT_READONLY"] = "1"
+        if extra_read_dirs:
+            env["SDLC_WORKER_READ_ONLY_REPOS"] = os.pathsep.join(str(path) for path in extra_read_dirs)
         return env
 
     def run(self, prompt_path: Path, repo: Path, mode: str, *, execute: bool = False, timeout: int = 120) -> WorkerResult:
@@ -157,24 +190,139 @@ class WorkerAdapter:
                 mode=mode,
                 timeout_seconds=timeout,
             )
-        result = run_cmd(
-            command,
-            repo,
-            timeout=timeout,
-            input_text=input_text,
-            env=env,
-            max_output_chars=WORKER_MAX_OUTPUT_CHARS,
-        )
+        hard_method = getattr(self, "_sdlc_hard_audit_isolation_method", None)
+        if hasattr(self, "_sdlc_hard_audit_isolation_method"):
+            delattr(self, "_sdlc_hard_audit_isolation_method")
+        audit_runtime_config = getattr(self, "_sdlc_audit_isolation_config", None)
+        if hasattr(self, "_sdlc_audit_isolation_config"):
+            delattr(self, "_sdlc_audit_isolation_config")
+        run_command = command
+        hard_temp: tempfile.TemporaryDirectory[str] | None = None
+        runtime_attestation: dict[str, Any] | None = None
+        if hard_method == "macos_sandbox_exec":
+            hard_temp = tempfile.TemporaryDirectory(prefix="sdlc-hard-audit-")
+            temp_dir = Path(hard_temp.name)
+            hard_home = _prepare_hard_audit_home(temp_dir, env)
+            for key, child in {
+                "XDG_CACHE_HOME": ".xdg-cache",
+                "XDG_CONFIG_HOME": ".xdg-config",
+                "XDG_DATA_HOME": ".xdg-data",
+            }.items():
+                path = temp_dir / child
+                path.mkdir(parents=True, exist_ok=True)
+                env[key] = str(path)
+            env["TMPDIR"] = str(temp_dir)
+            env["TMP"] = str(temp_dir)
+            env["TEMP"] = str(temp_dir)
+            env["HOME"] = str(hard_home)
+            try:
+                run_command = _macos_sandbox_exec_command(
+                    _external_hard_sandbox_command(command),
+                    repo,
+                    temp_dir,
+                    home_dir=hard_home,
+                )
+            except OSError as exc:
+                hard_temp.cleanup()
+                return WorkerResult(
+                    self.name,
+                    available,
+                    False,
+                    command,
+                    126,
+                    "",
+                    f"Hard audit isolation unavailable: {exc}",
+                    started,
+                    now_iso(),
+                    mode=mode,
+                    timeout_seconds=timeout,
+                )
+        elif hard_method:
+            env["SDLC_AUDIT_HARD_SOURCE_ISOLATION_METHOD"] = str(hard_method)
+        if isinstance(audit_runtime_config, dict):
+            kind = str(audit_runtime_config.get("kind") or "").strip().lower()
+            if kind == "container":
+                try:
+                    run_command, env, runtime_attestation = container_audit_command(
+                        config=audit_runtime_config,
+                        command=run_command,
+                        repo=repo,
+                        env=env,
+                    )
+                    hard_method = str(audit_runtime_config.get("method") or runtime_attestation.get("method") or "container")
+                except (KeyError, OSError, ValueError) as exc:
+                    if hard_temp is not None:
+                        hard_temp.cleanup()
+                    return WorkerResult(
+                        self.name,
+                        available,
+                        False,
+                        command,
+                        126,
+                        "",
+                        f"Hard audit isolation runtime could not prepare command: {exc}",
+                        started,
+                        now_iso(),
+                        mode=mode,
+                        timeout_seconds=timeout,
+                    )
+            elif kind == "vm":
+                if hard_temp is not None:
+                    hard_temp.cleanup()
+                return WorkerResult(
+                    self.name,
+                    available,
+                    False,
+                    command,
+                    126,
+                    "",
+                    "VM hard audit isolation execution requires a configured VM runner adapter.",
+                    started,
+                    now_iso(),
+                    mode=mode,
+                    timeout_seconds=timeout,
+                )
+        try:
+            result = run_cmd(
+                run_command,
+                repo,
+                timeout=timeout,
+                input_text=input_text,
+                env=env,
+                max_output_chars=WORKER_MAX_OUTPUT_CHARS,
+            )
+        finally:
+            if hard_temp is not None:
+                hard_temp.cleanup()
         timed_out = result["returncode"] == 124
         stderr = result["stderr"]
         if timed_out:
             timeout_note = f"Timed out after {timeout} seconds"
             stderr = timeout_note if not stderr or stderr == "Timed out" else f"{stderr}\n{timeout_note}"
+        process_cleanup_ok = bool(result.get("process_tree_cleanup_ok", True))
+        hard_method_text = str(hard_method) if hard_method else None
+        hard_isolation = bool(
+            hard_method_text
+            and is_hard_audit_isolation_method(hard_method_text)
+            and process_cleanup_ok
+            and not _hard_audit_sandbox_apply_failed(result)
+        )
+        advisory_isolation = bool(
+            hard_method_text
+            and not is_hard_audit_isolation_method(hard_method_text)
+            and _hard_audit_wrapper_enforced(run_command)
+            and process_cleanup_ok
+            and not _hard_audit_sandbox_apply_failed(result)
+        )
+        if runtime_attestation is not None:
+            runtime_attestation["process_cleanup_ok"] = process_cleanup_ok
+            runtime_attestation["worker_returncode"] = result["returncode"]
+            runtime_attestation["hard_isolation"] = hard_isolation
         return WorkerResult(
             self.name,
             True,
             True,
-            command,
+            run_command,
             result["returncode"],
             result["stdout"],
             stderr,
@@ -187,6 +335,11 @@ class WorkerAdapter:
             stdout_truncated=bool(result.get("stdout_truncated", False)),
             stderr_truncated=bool(result.get("stderr_truncated", False)),
             max_output_chars=int(result.get("max_output_chars", WORKER_MAX_OUTPUT_CHARS)),
+            hard_audit_isolation=hard_isolation,
+            hard_audit_isolation_method=hard_method_text if hard_isolation else None,
+            advisory_audit_isolation=advisory_isolation,
+            advisory_audit_isolation_method=hard_method_text if advisory_isolation else None,
+            audit_isolation_attestation=runtime_attestation,
         )
 
 
@@ -232,6 +385,225 @@ def _ensure_writable_worker_temp_dir(temp_dir: Path) -> None:
         except OSError:
             pass
         raise
+
+
+def hard_audit_source_isolation_method() -> str | None:
+    if _macos_sandbox_exec_usable():
+        return "macos_sandbox_exec"
+    return None
+
+
+def hard_audit_source_isolation_available() -> bool:
+    return hard_audit_source_isolation_method() is not None
+
+
+def _macos_sandbox_exec_command(command: list[str], repo: Path, temp_dir: Path, *, home_dir: Path | None = None) -> list[str]:
+    sandbox_exec = shutil.which("sandbox-exec")
+    if not sandbox_exec:
+        raise OSError("sandbox-exec is unavailable")
+    repo_path = repo.resolve(strict=False)
+    writable_paths = [temp_dir.resolve(strict=False), *_macos_codex_state_write_paths(home_dir)]
+    overlapping = [path for path in writable_paths if _paths_overlap(repo_path, path)]
+    if overlapping:
+        formatted = ", ".join(str(path) for path in overlapping)
+        raise OSError(f"macOS sandbox writable paths overlap audited source: {formatted}")
+    profile = "\n".join([
+        "(version 1)",
+        "(deny default)",
+        "(allow process*)",
+        "(allow ipc*)",
+        "(allow mach*)",
+        "(allow file-read*)",
+        "(allow network*)",
+        "(allow sysctl*)",
+        '(allow file-write* (literal "/dev/null"))',
+        f"(allow file-write* (subpath {_sandbox_string(temp_dir.resolve(strict=False))}))",
+    ])
+    for path in _macos_sensitive_read_deny_paths(home_dir):
+        profile += "\n" + f"(deny file-read* (subpath {_sandbox_string(path.resolve(strict=False))}))"
+    for path in _macos_runtime_read_paths(command):
+        profile += "\n" + f"(allow file-read* (subpath {_sandbox_string(path.resolve(strict=False))}))"
+    for path in _macos_codex_state_write_paths(home_dir):
+        profile += "\n" + f"(allow file-read* (subpath {_sandbox_string(path.resolve(strict=False))}))"
+        profile += "\n" + f"(allow file-write* (subpath {_sandbox_string(path.resolve(strict=False))}))"
+    return [sandbox_exec, "-p", profile, *command]
+
+
+def _external_hard_sandbox_command(command: list[str]) -> list[str]:
+    if len(command) < 2 or command[:2] != ["codex", "exec"]:
+        return command
+    transformed: list[str] = []
+    skip_next = False
+    inserted = False
+    for item in command:
+        if skip_next:
+            skip_next = False
+            continue
+        if item == "--sandbox":
+            skip_next = True
+            if not inserted:
+                transformed.append("--dangerously-bypass-approvals-and-sandbox")
+                inserted = True
+            continue
+        transformed.append(item)
+    if not inserted:
+        transformed.insert(2, "--dangerously-bypass-approvals-and-sandbox")
+    return transformed
+
+
+def _macos_sandbox_exec_usable() -> bool:
+    if sys.platform != "darwin" or not shutil.which("sandbox-exec"):
+        return False
+    with tempfile.TemporaryDirectory(prefix="sdlc-sandbox-probe-") as tmp:
+        root = Path(tmp)
+        source = root / "source"
+        writable = root / "writable"
+        source.mkdir()
+        writable.mkdir()
+        blocked = source / "blocked.txt"
+        allowed = writable / "allowed.txt"
+        profile = "\n".join([
+            "(version 1)",
+            "(deny default)",
+            "(allow process*)",
+            "(allow file-read*)",
+            "(allow sysctl*)",
+            '(allow file-write* (literal "/dev/null"))',
+            f"(allow file-write* (subpath {_sandbox_string(writable.resolve(strict=False))}))",
+        ])
+        for path in _macos_sensitive_read_deny_paths():
+            profile += "\n" + f"(deny file-read* (subpath {_sandbox_string(path.resolve(strict=False))}))"
+        for path in _macos_runtime_read_paths(["sh"]):
+            profile += "\n" + f"(allow file-read* (subpath {_sandbox_string(path.resolve(strict=False))}))"
+        result = run_cmd([
+            "sandbox-exec",
+            "-p",
+            profile,
+            "sh",
+            "-c",
+            f"printf ok > {_shell_quote(str(allowed))}; (printf blocked > {_shell_quote(str(blocked))}) 2>/dev/null || true",
+        ], root, timeout=5)
+        return result["returncode"] == 0 and allowed.exists() and not blocked.exists()
+
+
+def _hard_audit_sandbox_apply_failed(result: dict[str, Any]) -> bool:
+    stderr = str(result.get("stderr", ""))
+    return int(result.get("returncode", 0) or 0) == 71 or "sandbox_apply" in stderr
+
+
+def _hard_audit_wrapper_enforced(command: list[str]) -> bool:
+    return bool(command) and Path(command[0]).name == "sandbox-exec"
+
+
+def _macos_codex_state_write_paths(home: Path | None = None) -> list[Path]:
+    home = home or Path(os.environ.get("HOME", "")).expanduser()
+    if not home.is_absolute():
+        return []
+    return [
+        home / ".codex",
+        home / "Library" / "Application Support" / "Codex",
+        home / "Library" / "Caches" / "Codex",
+        home / "Library" / "Logs" / "Codex",
+    ]
+
+
+def _macos_runtime_read_paths(command: list[str]) -> list[Path]:
+    paths = [
+        Path("/bin"),
+        Path("/usr/bin"),
+        Path("/usr/lib"),
+        Path("/System/Library"),
+        Path("/Library/Apple"),
+        Path("/dev"),
+        Path("/private/var/db"),
+    ]
+    for optional in ("/opt/homebrew", "/usr/local"):
+        path = Path(optional)
+        if path.exists():
+            paths.append(path)
+    if command:
+        binary = shutil.which(command[0])
+        if binary:
+            paths.append(Path(binary).resolve(strict=False).parent)
+    return paths
+
+
+def _macos_sensitive_read_deny_paths(hard_home: Path | None = None) -> list[Path]:
+    home = Path(os.environ.get("HOME", "")).expanduser()
+    if not home.is_absolute():
+        return []
+    candidates = [home]
+    if hard_home:
+        try:
+            hard_home.resolve(strict=False).relative_to(home.resolve(strict=False))
+        except ValueError:
+            pass
+        else:
+            candidates = [
+                home / ".ssh",
+                home / ".aws",
+                home / ".gcp",
+                home / ".azure",
+                home / ".kube",
+                home / ".docker",
+                home / ".gnupg",
+                home / ".config" / "gh",
+                home / ".config" / "gcloud",
+                home / ".netrc",
+                home / "Desktop",
+                home / "Documents",
+                home / "Downloads",
+            ]
+    return [path for path in candidates if path.exists()]
+
+
+def _prepare_hard_audit_home(temp_dir: Path, env: dict[str, str]) -> Path:
+    hard_home = temp_dir / "home"
+    hard_home.mkdir(parents=True, exist_ok=True)
+    original_home = Path(os.environ.get("HOME", "")).expanduser()
+    if original_home.is_absolute():
+        source_codex = original_home / ".codex"
+        target_codex = hard_home / ".codex"
+        if source_codex.is_dir() and not target_codex.exists():
+            shutil.copytree(
+                source_codex,
+                target_codex,
+                symlinks=False,
+                ignore=shutil.ignore_patterns(
+                    "logs",
+                    "sessions",
+                    "history",
+                    "*.log",
+                    "*.sock",
+                ),
+            )
+    for key in ("USER", "LOGNAME"):
+        if key in os.environ and key not in env:
+            env[key] = os.environ[key]
+    return hard_home
+
+
+def _paths_overlap(left: Path, right: Path) -> bool:
+    try:
+        left.relative_to(right)
+        return True
+    except ValueError:
+        pass
+    try:
+        right.relative_to(left)
+        return True
+    except ValueError:
+        return False
+
+
+def _shell_quote(value: str) -> str:
+    return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+def _sandbox_string(path: Path) -> str:
+    text = str(path)
+    text = text.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{text}"'
 
 
 def _codex_security_review_workspace(prompt_path: Path, repo: Path, mode: str) -> Path:
@@ -362,6 +734,8 @@ class CodexAdapter(WorkerAdapter):
             command.extend(["--profile-v2", self.profile_v2])
         if mode in {"BUILD", "FIX", "TEST"} or _is_security_review_mode(mode):
             command.extend(["--add-dir", str(_worker_temp_dir(prompt_path, repo, mode))])
+        for extra_dir in _worker_extra_read_dirs(self):
+            command.extend(["--add-dir", str(extra_dir)])
         command.append("-")
         return command
 
@@ -378,7 +752,7 @@ class ClaudeAdapter(WorkerAdapter):
 
     def build_command(self, prompt_path: Path, repo: Path, mode: str) -> list[str]:
         permission_mode = "plan" if mode in {"PLAN", "READ_ONLY"} or _is_security_review_mode(mode) else "default"
-        return [
+        command = [
             "claude",
             "--print",
             "--output-format",
@@ -386,6 +760,9 @@ class ClaudeAdapter(WorkerAdapter):
             "--permission-mode",
             permission_mode,
         ]
+        for extra_dir in _worker_extra_read_dirs(self):
+            command.extend(["--add-dir", str(extra_dir)])
+        return command
 
     def security_review_write_protected(self, policy: dict[str, Any] | None = None) -> bool:
         return True
@@ -463,7 +840,7 @@ def adapter_from_policy(name: str, policy: dict[str, Any] | None = None) -> Work
     family_config = policy.get("worker_families", {})
     candidates: list[tuple[Any, bool, str]] = []
     if isinstance(configured, dict):
-        candidates.append((configured.get(name), False, "local"))
+        candidates.append((configured.get(name), False, "external-custom"))
     if isinstance(family_config, dict):
         family = family_config.get(name)
         if isinstance(family, dict):
@@ -476,10 +853,10 @@ def adapter_from_policy(name: str, policy: dict[str, Any] | None = None) -> Work
                     profile_v2=_optional_config_text(family.get("profile_v2")),
                 )
             protected = bool(family.get("security_review_write_protected") or family.get("read_only_security_review"))
-            provider = str(family.get("provider") or "local")
+            provider = str(family.get("provider") or "external-custom")
             candidates.append((family.get("command"), protected, provider))
         else:
-            candidates.append((family, False, "local"))
+            candidates.append((family, False, "external-custom"))
     for command, protected, provider in candidates:
         if isinstance(command, str) and command.strip():
             return LocalCommandAdapter(name, command.split(), security_review_protected=protected, provider=provider)

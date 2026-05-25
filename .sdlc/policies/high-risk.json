@@ -63,6 +63,16 @@
     "allowed_providers": [
       "openai"
     ],
+    "audit_isolation": {
+      "auth": {
+        "mode": "absent"
+      },
+      "auth_env": [],
+      "container_engine": "auto",
+      "container_image": "",
+      "network_mode": "none",
+      "runtime": "container"
+    },
     "critical_high_auto_fix_required": true,
     "cross_model_independence": "distinct_openai_model_identity",
     "cross_model_required_for_high_or_extreme": true,

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import sys
 import json
 import math
@@ -17,9 +16,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .adapters import WorkerResult, _ensure_writable_worker_temp_dir, _worker_temp_dir, adapter_from_policy, capture_worker_result, worker_identity_group
+from .audit_runtime import audit_isolation_preflight
 from .ledger import Ledger
 from .models import RunPlan, Finding, invalid_findings, open_findings, plan_condition_value
 from .policies import load_policy
+from .prompts import PROMPT_BINDING_RE, redteam_prompt_binding_sha256
 from .scanners import run_security_scans, scan_notes, scan_verdict
 from .util import find_files, git_current_branch, is_git_repo, now_iso, read_json, run_cmd, write_json
 from .validation import validate_json_schema
@@ -34,7 +35,6 @@ DRY_GO_GATE_IDS = {
 }
 RUN_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,127}$")
 EXTERNAL_WORKER_PROVIDERS = {"openai", "anthropic", "google", "moonshot"}
-HARD_AUDIT_ISOLATION_ENV = "SDLC_AUDIT_HARD_SOURCE_ISOLATION"
 
 
 def validate_run_id(run_id: str) -> str:
@@ -326,6 +326,15 @@ def execute_redteam_workers(
     prompt_path = run_dir / "prompts" / "redteam_prompt.md"
     prompt_text = prompt_path.read_text(encoding="utf-8") if prompt_path.exists() else ""
     prompt_binding = _prompt_binding_from_text(prompt_text)
+    expected_prompt_binding = _recorded_redteam_prompt_binding(run_dir)
+    if expected_prompt_binding and prompt_binding != expected_prompt_binding:
+        ledger.event(
+            "redteam.prompt_binding_mismatch",
+            expected_sha256=expected_prompt_binding,
+            actual_sha256=prompt_binding,
+            prompt_path="prompts/redteam_prompt.md",
+        )
+        prompt_binding = ""
     findings = store.load_findings(run_id)
     policy = load_policy(repo, plan.policy_profile)
     redteam_policy = policy.get("redteam", {})
@@ -596,6 +605,9 @@ def execute_redteam_workers(
     timed_out_workers: list[str] = []
     truncated_workers: list[str] = []
     skipped_due_total_timeout: list[str] = []
+    hard_isolated_workers: list[str] = []
+    audit_isolation_attestations: list[str] = []
+    worker_providers: dict[str, str] = {}
     active_worker: str | None = None
     active_round: int | None = None
 
@@ -644,9 +656,27 @@ def execute_redteam_workers(
         worker_results.append({"worker": worker, "round": round_number, "available": True, "executed": False, "artifact": artifact})
         emit_progress("redteam.worker_rejected", worker=worker, round=round_number, reason="security_review_write_isolation_missing")
 
-    def record_hard_isolation_rejected(worker: str, round_number: int, adapter: Any) -> None:
+    def record_hard_isolation_rejected(worker: str, round_number: int, adapter: Any, preflight: Any | None = None) -> None:
         unavailable.append(worker)
         provider = str(getattr(adapter, "provider", "unknown"))
+        reason = (
+            str(getattr(preflight, "reason", "") or "").strip()
+            or "No qualifying container/VM hard audit isolation runtime was available for this worker."
+        )
+        attestation = getattr(preflight, "attestation", None)
+        attestation_artifact = None
+        if isinstance(attestation, dict):
+            attestation_artifact = ledger.artifact(
+                f"artifacts/redteam/round-{round_number}-{worker}-isolation-attestation.json",
+                json.dumps(attestation, indent=2, sort_keys=True) + "\n",
+                event="redteam.isolation_attestation_written",
+                worker=worker,
+                provider=provider,
+                round=round_number,
+                hard_isolation=False,
+                method=attestation.get("method"),
+            )
+            audit_isolation_attestations.append(attestation_artifact)
         artifact = ledger.artifact(
             f"artifacts/redteam/round-{round_number}-{worker}-hard-source-isolation-unavailable.json",
             json.dumps({
@@ -655,17 +685,16 @@ def execute_redteam_workers(
                 "round": round_number,
                 "available": True,
                 "executed": False,
-                "reason": (
-                    "External high-stakes red-team execution requires hard read-only source isolation. "
-                    f"Set {HARD_AUDIT_ISOLATION_ENV}=1 only when an external sandbox, container, or mount "
-                    "enforces a non-mutable source view."
-                ),
+                "reason": reason,
+                "isolation_attestation": attestation_artifact,
             }, indent=2, sort_keys=True) + "\n",
             event="redteam.worker_rejected",
             worker=worker,
             provider=provider,
             round=round_number,
             reason="audit_source_hard_readonly_isolation_unavailable",
+            detail=reason,
+            isolation_attestation=attestation_artifact,
         )
         worker_results.append({"worker": worker, "round": round_number, "available": True, "executed": False, "artifact": artifact})
         emit_progress(
@@ -680,12 +709,80 @@ def execute_redteam_workers(
         if adapter is None:
             record_unavailable(worker, round_number)
             return None
+        worker_providers[worker] = str(getattr(adapter, "provider", "unknown")).strip().lower() or "unknown"
+        if hasattr(adapter, "_sdlc_hard_audit_isolation_method"):
+            delattr(adapter, "_sdlc_hard_audit_isolation_method")
         if execute and not adapter.security_review_write_protected(policy):
             record_rejected(worker, round_number)
             return None
-        if execute and _external_hard_audit_isolation_required(plan, redteam_policy, adapter) and not _hard_audit_isolation_enabled():
-            record_hard_isolation_rejected(worker, round_number, adapter)
-            return None
+        if execute and _external_hard_audit_isolation_required(plan, redteam_policy, adapter):
+            preflight = audit_isolation_preflight(
+                policy=policy,
+                repo=repo,
+                worker=worker,
+                provider=worker_providers[worker],
+                prompt_sha256=prompt_binding,
+                allow_network=allow_network,
+            )
+            ledger.event(
+                "redteam.isolation_runtime_selected",
+                worker=worker,
+                provider=worker_providers[worker],
+                round=round_number,
+                requested_kind=preflight.requested_kind,
+                runtime_kind=preflight.runtime_kind,
+                method=preflight.method,
+                hard_isolation=preflight.hard_isolation,
+                advisory_isolation=preflight.advisory_isolation,
+            )
+            ledger.event(
+                "redteam.isolation_preflight_result",
+                worker=worker,
+                provider=worker_providers[worker],
+                round=round_number,
+                available=preflight.available,
+                hard_isolation=preflight.hard_isolation,
+                advisory_isolation=preflight.advisory_isolation,
+                method=preflight.method,
+                reason=preflight.reason,
+            )
+            probe = preflight.attestation.get("source_write_probe") if isinstance(preflight.attestation, dict) else {}
+            ledger.event(
+                "redteam.isolation_readonly_source_probe",
+                worker=worker,
+                round=round_number,
+                method=preflight.method,
+                attempted=bool(isinstance(probe, dict) and probe.get("attempted")),
+                passed=bool(isinstance(probe, dict) and probe.get("passed")),
+            )
+            ledger.event(
+                "redteam.isolation_credential_result",
+                worker=worker,
+                round=round_number,
+                method=preflight.method,
+                auth_mode=preflight.auth_mode,
+                host_credential_dirs_mounted=bool(preflight.attestation.get("host_credential_dirs_mounted")) if isinstance(preflight.attestation, dict) else True,
+            )
+            ledger.event(
+                "redteam.isolation_network_policy",
+                worker=worker,
+                round=round_number,
+                method=preflight.method,
+                network_mode=preflight.network_mode,
+                policy_allow_network=allow_network,
+            )
+            if not preflight.hard_isolation or not preflight.adapter_config:
+                ledger.event(
+                    "redteam.isolation_failure",
+                    worker=worker,
+                    provider=worker_providers[worker],
+                    round=round_number,
+                    method=preflight.method,
+                    reason=preflight.reason,
+                )
+                record_hard_isolation_rejected(worker, round_number, adapter, preflight)
+                return None
+            setattr(adapter, "_sdlc_audit_isolation_config", preflight.adapter_config)
         return adapter
 
     def record_total_timeout_skip(worker: str, round_number: int) -> None:
@@ -812,6 +909,42 @@ def execute_redteam_workers(
             available_families.add(worker)
         else:
             unavailable.append(worker)
+        if result.hard_audit_isolation:
+            method = result.hard_audit_isolation_method or "unknown"
+            label = f"{worker}@round{round_number}:{method}"
+            hard_isolated_workers.append(label)
+            ledger.event(
+                "redteam.worker_hard_audit_isolated",
+                worker=worker,
+                round=round_number,
+                method=method,
+            )
+        if result.advisory_audit_isolation:
+            ledger.event(
+                "redteam.worker_advisory_audit_isolated",
+                worker=worker,
+                round=round_number,
+                method=result.advisory_audit_isolation_method or "unknown",
+            )
+        if isinstance(result.audit_isolation_attestation, dict):
+            artifact = ledger.artifact(
+                f"artifacts/redteam/round-{round_number}-{worker}-runtime-attestation.json",
+                json.dumps(result.audit_isolation_attestation, indent=2, sort_keys=True) + "\n",
+                event="redteam.isolation_attestation_written",
+                worker=worker,
+                provider=worker_providers.get(worker, "unknown"),
+                round=round_number,
+                hard_isolation=result.hard_audit_isolation,
+                method=result.hard_audit_isolation_method,
+            )
+            audit_isolation_attestations.append(artifact)
+            ledger.event(
+                "redteam.isolation_process_cleanup_result",
+                worker=worker,
+                round=round_number,
+                method=result.hard_audit_isolation_method,
+                passed=bool(result.audit_isolation_attestation.get("process_cleanup_ok")),
+            )
         declared_verdict = _worker_declared_verdict(result.stdout)
         if declared_verdict:
             context_attested = _worker_attested_review(result.stdout, plan.run_id, prompt_binding)
@@ -907,6 +1040,10 @@ def execute_redteam_workers(
                             if redteam_journal is not None:
                                 redteam_journal.reset(redteam_before)
                         continue
+                    if execute:
+                        redteam_before = _repo_snapshot(repo, include_run_artifacts=True)
+                        if redteam_journal is not None:
+                            redteam_journal.reset(redteam_before)
                     effective_timeout, timeout_scope = worker_timeout_remaining()
                     if effective_timeout is None:
                         record_total_timeout_skip(worker, round_number)
@@ -988,6 +1125,9 @@ def execute_redteam_workers(
         timed_out_workers=timed_out_workers,
         truncated_workers=truncated_workers,
         skipped_due_total_timeout=skipped_due_total_timeout,
+        hard_isolated_workers=hard_isolated_workers,
+        worker_providers=worker_providers,
+        audit_isolation_attestations=audit_isolation_attestations,
         verdict=verdict,
         notes=notes,
         worker_timeout_seconds=worker_timeout,
@@ -1012,6 +1152,9 @@ def execute_redteam_workers(
         timed_out_workers=timed_out_workers,
         truncated_workers=truncated_workers,
         skipped_due_total_timeout=skipped_due_total_timeout,
+        hard_isolated_workers=hard_isolated_workers,
+        worker_providers=worker_providers,
+        audit_isolation_attestations=audit_isolation_attestations,
         evidence=[summary],
         worker_timeout_seconds=worker_timeout,
         total_timeout_seconds=total_timeout_seconds,
@@ -1034,6 +1177,9 @@ def execute_redteam_workers(
         "timed_out_workers": timed_out_workers,
         "truncated_workers": truncated_workers,
         "skipped_due_total_timeout": skipped_due_total_timeout,
+        "hard_isolated_workers": hard_isolated_workers,
+        "worker_providers": worker_providers,
+        "audit_isolation_attestations": audit_isolation_attestations,
         "worker_timeout_seconds": worker_timeout,
         "total_timeout_seconds": total_timeout_seconds,
         "parallel_per_round_requested": parallel_per_round,
@@ -1179,16 +1325,14 @@ def _redteam_allowed_provider_error(workers: list[str], policy: dict[str, Any], 
 
 def _external_hard_audit_isolation_required(plan: RunPlan, redteam_policy: dict[str, Any], adapter: Any) -> bool:
     provider = str(getattr(adapter, "provider", "local")).strip().lower()
-    if provider not in EXTERNAL_WORKER_PROVIDERS:
+    if provider == "local":
         return False
+    if plan.risk_level in {"HIGH", "EXTREME"}:
+        return True
     configured = redteam_policy.get("external_hard_source_isolation_required")
     if configured is not None:
         return bool(configured)
-    return plan.risk_level in {"HIGH", "EXTREME"}
-
-
-def _hard_audit_isolation_enabled() -> bool:
-    return os.environ.get(HARD_AUDIT_ISOLATION_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+    return False
 
 
 def _set_redteam_gate(store: RunStore, plan: RunPlan, summary: str, worker_results: list[dict[str, Any]], verdict: str, notes: str) -> None:
@@ -1399,8 +1543,34 @@ def _dedupe_payloads(payloads: list[Any]) -> list[Any]:
 
 
 def _prompt_binding_from_text(text: str) -> str:
-    match = re.search(r"^Prompt binding SHA256:\s*([a-f0-9]{64})\s*$", text, flags=re.MULTILINE)
-    return match.group(1) if match else ""
+    match = PROMPT_BINDING_RE.search(text)
+    embedded = match.group(1) if match and re.fullmatch(r"[a-f0-9]{64}", match.group(1)) else ""
+    if not embedded:
+        return ""
+    computed = redteam_prompt_binding_sha256(text)
+    return embedded if embedded == computed else computed
+
+
+def _recorded_redteam_prompt_binding(run_dir: Path) -> str:
+    manifest = run_dir / "artifacts" / "prompts" / "manifest.json"
+    if not manifest.exists():
+        return ""
+    try:
+        payload = read_json(manifest, {})
+    except Exception:
+        return ""
+    prompts = payload.get("prompts") if isinstance(payload, dict) else None
+    if not isinstance(prompts, dict):
+        return ""
+    value = prompts.get("redteam_prompt.md")
+    return str(value) if isinstance(value, str) and re.fullmatch(r"[a-f0-9]{64}", value) else ""
+
+
+def _load_run_policy(run_dir: Path, repo: Path, profile: str) -> dict[str, Any]:
+    snapshot = run_dir / "artifacts" / "policy" / "snapshot.json"
+    if snapshot.exists():
+        return read_json(snapshot, load_policy(repo, profile))
+    return load_policy(repo, profile)
 
 
 def _worker_attested_review(output: str, run_id: str, prompt_sha256: str) -> bool:
@@ -1787,6 +1957,9 @@ def _write_redteam_execution_summary(
     timed_out_workers: list[str] | None = None,
     truncated_workers: list[str] | None = None,
     skipped_due_total_timeout: list[str] | None = None,
+    hard_isolated_workers: list[str] | None = None,
+    worker_providers: dict[str, str] | None = None,
+    audit_isolation_attestations: list[str] | None = None,
     verdict: str,
     notes: str,
     worker_timeout_seconds: int | None = None,
@@ -1822,6 +1995,9 @@ def _write_redteam_execution_summary(
         "timed_out_workers: " + (", ".join(timed_out_workers or []) or "<none>"),
         "truncated_workers: " + (", ".join(truncated_workers or []) or "<none>"),
         "skipped_due_total_timeout: " + (", ".join(skipped_due_total_timeout or []) or "<none>"),
+        "hard_audit_isolated_workers: " + (", ".join(hard_isolated_workers or []) or "<none>"),
+        "worker_providers: " + (", ".join(f"{worker}:{provider}" for worker, provider in sorted((worker_providers or {}).items())) or "<none>"),
+        "audit_isolation_attestations: " + (", ".join(audit_isolation_attestations or []) or "<none>"),
         f"parsed_findings: {', '.join(finding.id for finding in parsed_findings) if parsed_findings else '<none>'}",
         f"verdict: {verdict}",
         "",

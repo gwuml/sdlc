@@ -25,6 +25,14 @@ DEFAULT_POLICY: dict[str, Any] = {
         "default_workers": ["openai-codex-primary", "openai-codex-adversary"],
         "critical_high_auto_fix_required": True,
         "implementer_cannot_close_findings": True,
+        "audit_isolation": {
+            "runtime": "container",
+            "container_engine": "auto",
+            "container_image": "",
+            "network_mode": "none",
+            "auth": {"mode": "absent"},
+            "auth_env": [],
+        },
     },
     "scanner_thresholds": {
         "block_severities": ["CRITICAL", "HIGH"],
@@ -91,16 +99,53 @@ HIGH_RISK_POLICY: dict[str, Any] = {
     },
 }
 
+HOST_OAUTH_TOOLS_POLICY: dict[str, Any] = {
+    **DEFAULT_POLICY,
+    "name": "host-oauth-tools",
+    "network_allowed": True,
+    "permissions": {
+        **DEFAULT_POLICY["permissions"],
+        "implementer": {
+            **DEFAULT_POLICY["permissions"]["implementer"],
+            "allow_paths": [
+                "docs/**",
+                "tests/**",
+                ".codex/prompts/**",
+                ".sdlc/templates/**",
+                ".sdlc/schemas/**",
+                ".sdlc/policies/**",
+            ],
+            "deny_paths": [
+                ".env*",
+                "secrets/**",
+                "infra/prod/**",
+                ".sdlc/runs/**",
+                ".sdlc/memory.sqlite",
+            ],
+        },
+    },
+    "redteam": {
+        **DEFAULT_POLICY["redteam"],
+        "audit_isolation": {
+            **DEFAULT_POLICY["redteam"]["audit_isolation"],
+            "auth": {"mode": "brokered"},
+        },
+    },
+}
+
 
 def ensure_policy_files(base: Path) -> None:
     policies = base / ".sdlc" / "policies"
     policies.mkdir(parents=True, exist_ok=True)
     write_json(policies / "default.json", DEFAULT_POLICY)
     write_json(policies / "high-risk.json", HIGH_RISK_POLICY)
+    write_json(policies / "host-oauth-tools.json", HOST_OAUTH_TOOLS_POLICY)
 
 
 def load_policy(repo: Path, profile: str = "default") -> dict[str, Any]:
     path = repo / ".sdlc" / "policies" / f"{profile}.json"
     if path.exists():
         return read_json(path, DEFAULT_POLICY)
+    if profile == "host-oauth-tools":
+        return HOST_OAUTH_TOOLS_POLICY
     return HIGH_RISK_POLICY if profile == "high-risk" else DEFAULT_POLICY

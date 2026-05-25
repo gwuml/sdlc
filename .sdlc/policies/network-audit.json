@@ -56,6 +56,19 @@
       "openai-codex-adversary"
     ],
     "implementer_cannot_close_findings": true,
+    "audit_isolation": {
+      "auth": {
+        "mode": "scoped_env"
+      },
+      "auth_env": [
+        "OPENAI_API_KEY"
+      ],
+      "container_engine": "auto",
+      "container_image": "sdlc-codex-audit@sha256:6112ed05979bf65b0070743ceafa4cfdaf3ffcf74d2ec2cc5438cecf474a4e13",
+      "image_digest": "sha256:6112ed05979bf65b0070743ceafa4cfdaf3ffcf74d2ec2cc5438cecf474a4e13",
+      "network_mode": "bridge",
+      "runtime": "container"
+    },
     "min_rounds_high_stakes": 3,
     "required": true
   },

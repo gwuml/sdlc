@@ -3,10 +3,37 @@
 from __future__ import annotations
 
 import tempfile
+import re
 from pathlib import Path
 
 from .models import RunPlan
 from .util import sha256_text
+
+
+PROMPT_BINDING_RE = re.compile(r"^Prompt binding SHA256:\s*([a-f0-9]{64}|<pending>|<bound>)\s*$", re.MULTILINE)
+PROMPT_BINDING_CANONICAL_LINE = "Prompt binding SHA256: <bound>"
+PROMPT_JSON_BINDING_RE = re.compile(r'("prompt_sha256":\s*")([a-f0-9]{64}|<pending>|<bound>)(")')
+PROMPT_TEXT_BINDING_RE = re.compile(r'(prompt_sha256:\s*")([a-f0-9]{64}|<pending>|<bound>)(")')
+
+
+def canonical_redteam_prompt_text(text: str) -> str:
+    text = PROMPT_BINDING_RE.sub(PROMPT_BINDING_CANONICAL_LINE, text, count=1)
+    text = PROMPT_JSON_BINDING_RE.sub(r"\1<bound>\3", text)
+    text = PROMPT_TEXT_BINDING_RE.sub(r"\1<bound>\3", text)
+    return text
+
+
+def redteam_prompt_binding_sha256(text: str) -> str:
+    return sha256_text(canonical_redteam_prompt_text(text))
+
+
+def bind_redteam_prompt(plan: RunPlan) -> str:
+    base = render_redteam_prompt(plan, PROMPT_BINDING_CANONICAL_LINE.rsplit(" ", 1)[-1])
+    digest = redteam_prompt_binding_sha256(base)
+    prompt = render_redteam_prompt(plan, digest)
+    if redteam_prompt_binding_sha256(prompt) != digest:
+        raise RuntimeError("red-team prompt binding is not stable")
+    return prompt
 
 
 def render_execution_prompt(plan: RunPlan) -> str:
@@ -117,7 +144,7 @@ Risk: {plan.risk_level}
 Run ID: {plan.run_id}
 Prompt binding SHA256: {prompt_sha256 or "<pending>"}
 
-You are the independent red-team. You are read-only with respect to the source repository. The orchestrator may execute you inside a disposable audit workspace so tests can write temporary files without mutating the source repo. You must be adversarial, evidence-driven, and honest. Assume the user may go all in. Optimism is not evidence. Do not edit source repository files. If you run tests, use the orchestrator-provided environment without overriding it to a repository path: `cd "${{SDLC_WORKER_REPO:?orchestrator_repo_not_set}}" && PYTHONDONTWRITEBYTECODE=1 TMPDIR="${{TMPDIR:?orchestrator_TMPDIR_not_set}}" python -m unittest discover -s tests`. Do not set TMPDIR to `$PWD/.sdlc-redteam-tmp`; the adapter provides a writable temp directory outside the audited source tree. Codex security reviews use a writable temp harness as the primary workspace while `SDLC_WORKER_REPO` points to the audited source outside that writable root.
+You are the independent red-team. You are read-only with respect to the source repository. The orchestrator may execute you inside a disposable audit workspace so tests can write temporary files without mutating the source repo. For high-stakes external audits, the orchestrator must enforce or attest hard source isolation before launching you; prompt compliance is only a secondary control. You must be adversarial, evidence-driven, and honest. Assume the user may go all in. Optimism is not evidence. Do not edit source repository files. Write audit notes and test scratch data only to the orchestrator-provided temp directory (`TMPDIR`, `TMP`, or `TEMP`) and never to the audited source tree. If you run tests, use the orchestrator-provided environment without overriding it to a repository path: `cd "${{SDLC_WORKER_REPO:?orchestrator_repo_not_set}}" && PYTHONDONTWRITEBYTECODE=1 TMPDIR="${{TMPDIR:?orchestrator_TMPDIR_not_set}}" python -m unittest discover -s tests`. Do not set TMPDIR to `$PWD/.sdlc-redteam-tmp`; the adapter provides a writable temp directory outside the audited source tree. Codex security reviews use a writable temp harness as the primary workspace while `SDLC_WORKER_REPO` points to the audited source outside that writable root.
 
 If you run release validation from the disposable audit workspace, use
 `cd "${{SDLC_WORKER_REPO:?orchestrator_repo_not_set}}" && PYTHONDONTWRITEBYTECODE=1 TMPDIR="${{TMPDIR:?orchestrator_TMPDIR_not_set}}" python -m sdlc validate --run-id {plan.run_id} --release --audit-workspace`.
@@ -219,8 +246,7 @@ Do not implement. Produce the UI contract that implementation and QA must satisf
 def write_prompt_bundle(run_dir: Path, plan: RunPlan) -> dict[str, str]:
     prompts_dir = run_dir / "prompts"
     prompts_dir.mkdir(parents=True, exist_ok=True)
-    redteam_base = render_redteam_prompt(plan)
-    redteam_prompt = render_redteam_prompt(plan, sha256_text(redteam_base))
+    redteam_prompt = bind_redteam_prompt(plan)
     bundle = {
         "execution_prompt.md": render_execution_prompt(plan),
         "redteam_prompt.md": redteam_prompt,

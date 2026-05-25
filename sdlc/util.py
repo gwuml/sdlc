@@ -183,27 +183,42 @@ def run_cmd(
     max_output_chars: int = 1_000_000,
     env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    def _terminate_process_tree(proc: subprocess.Popen[bytes], *, pgid: int | None = None, grace_seconds: float = 0.25) -> None:
+    def _terminate_process_tree(proc: subprocess.Popen[bytes], *, pgid: int | None = None, grace_seconds: float = 0.25) -> bool:
         if os.name == "posix":
             if pgid is None:
                 try:
                     pgid = os.getpgid(proc.pid)
                 except OSError:
-                    return
+                    return True
             if pgid == os.getpgrp():
-                return
+                return True
             try:
                 os.killpg(pgid, signal.SIGTERM)
                 time.sleep(grace_seconds)
+            except ProcessLookupError:
+                return True
             except OSError:
-                return
-            try:
-                os.killpg(pgid, signal.SIGKILL)
-            except OSError:
-                pass
-            return
+                return False
+            deadline = time.monotonic() + 2.0
+            while True:
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except ProcessLookupError:
+                    return True
+                except OSError:
+                    return False
+                if time.monotonic() >= deadline:
+                    try:
+                        os.killpg(pgid, 0)
+                    except ProcessLookupError:
+                        return True
+                    except OSError:
+                        return False
+                    return False
+                time.sleep(0.05)
         if proc.poll() is None:
             proc.kill()
+        return True
 
     def _read_limited(handle: Any) -> tuple[str, bool]:
         handle.seek(0)
@@ -234,7 +249,7 @@ def run_cmd(
             try:
                 proc.communicate(input=input_text.encode("utf-8") if input_text is not None else None, timeout=timeout)
             except subprocess.TimeoutExpired:
-                _terminate_process_tree(proc, pgid=process_group_id)
+                cleanup_ok = _terminate_process_tree(proc, pgid=process_group_id)
                 proc.communicate()
                 out, out_truncated = _read_limited(stdout)
                 err, err_truncated = _read_limited(stderr)
@@ -246,18 +261,23 @@ def run_cmd(
                     "stdout_truncated": out_truncated,
                     "stderr_truncated": err_truncated,
                     "max_output_chars": max_output_chars,
+                    "process_tree_cleanup_ok": cleanup_ok,
                 }
-            _terminate_process_tree(proc, pgid=process_group_id)
+            cleanup_ok = _terminate_process_tree(proc, pgid=process_group_id)
             out, out_truncated = _read_limited(stdout)
             err, err_truncated = _read_limited(stderr)
+            returncode = proc.returncode if cleanup_ok else 125
+            if not cleanup_ok and not err:
+                err = "Worker process descendants remained after cleanup"
             return {
                 "cmd": cmd,
-                "returncode": proc.returncode,
+                "returncode": returncode,
                 "stdout": out,
                 "stderr": err,
                 "stdout_truncated": out_truncated,
                 "stderr_truncated": err_truncated,
                 "max_output_chars": max_output_chars,
+                "process_tree_cleanup_ok": cleanup_ok,
             }
     except FileNotFoundError:
         return {"cmd": cmd, "returncode": 127, "stdout": "", "stderr": f"Command not found: {cmd[0]}", "stdout_truncated": False, "stderr_truncated": False, "max_output_chars": max_output_chars}

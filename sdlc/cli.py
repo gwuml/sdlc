@@ -19,6 +19,7 @@ from typing import Any
 from .adapters import ADAPTERS, adapter_from_policy, capture_worker_result, worker_identity_group
 from .agents import agent_status, agents_doctor, execute_agent_plan, write_agent_plan
 from .attestations import MANIFEST_PATH, SIGNATURE_PATH, VERIFY_PATH, _verify_manifest_entries, sign_artifact_manifest, verify_artifact_manifest, write_artifact_manifest
+from .audit_runtime import audit_isolation_preflight, is_hard_audit_isolation_method
 from .briefing import build_intake_brief, build_standards_mapping, write_prework_artifacts
 from .classifier import classify_feature
 from .deploy import approve_deployment, execute_deployment, plan_deployment, production_deploy_gate_rejection, rollback_deployment, verify_deployment
@@ -28,7 +29,7 @@ from .memory import delete_memory, disable_memory, export_memory, init_memory, m
 from .models import GateState, RunPlan, Finding, invalid_findings, open_findings, plan_condition_value
 from .pipeline import DEFAULT_GATES, gates_as_dicts
 from .policies import ensure_policy_files, load_policy
-from .prompts import write_prompt_bundle
+from .prompts import redteam_prompt_binding_sha256, write_prompt_bundle
 from .reporting import build_report, generate_report
 from .scanners import run_security_scans, scan_notes, scan_verdict
 from .util import git_current_branch, is_git_repo, now_iso, read_json, relpath_under_base, resolve_repo_paths, resolve_under_base, run_cmd, slugify, write_json
@@ -1473,7 +1474,7 @@ def _validate_redteam_gate_completion(store: RunStore, plan: RunPlan, gate: Gate
         return "Red-team gate requires executed worker evidence, not dry-run evidence"
     if _summary_value(summary, "verdict") not in POSITIVE_GATE_VERDICTS:
         return "Red-team execution summary must have a positive verdict"
-    policy = load_policy(Path(plan.repo), plan.policy_profile)
+    policy = _load_release_policy_snapshot(store.run_dir(plan.run_id), Path(plan.repo), plan.policy_profile)
     min_rounds = int(policy.get("redteam", {}).get("min_rounds_high_stakes", 1) or 1)
     if plan.risk_level in {"HIGH", "EXTREME"} and int(_summary_value(summary, "rounds") or "0") < min_rounds:
         return f"Red-team summary does not satisfy policy minimum rounds: {min_rounds}"
@@ -1526,6 +1527,47 @@ def _validate_redteam_gate_completion(store: RunStore, plan: RunPlan, gate: Gate
         latest_groups = {worker_identity_group(worker, policy) for worker in latest_executed}
     if plan.risk_level in {"HIGH", "EXTREME"} and len(latest_groups) < 2:
         return "Red-team ledger evidence must include at least two distinct executed model identities"
+    latest_worker_providers = latest.get("worker_providers", {})
+    latest_external_executed = []
+    for worker in latest_executed:
+        provider = ""
+        if isinstance(latest_worker_providers, dict):
+            provider = str(latest_worker_providers.get(worker, "")).strip().lower()
+        if not provider:
+            adapter = adapter_from_policy(worker, policy)
+            provider = str(getattr(adapter, "provider", "unknown")).strip().lower() if adapter is not None else "unknown"
+        if provider != "local":
+            latest_external_executed.append(worker)
+    if plan.risk_level in {"HIGH", "EXTREME"} and latest_external_executed:
+        hard_latest = latest.get("hard_isolated_workers", [])
+        if not isinstance(hard_latest, list):
+            return "Red-team ledger evidence has malformed hard-isolated worker bindings"
+        hard_latest_rounds = {str(item).split(":", 1)[0] for item in hard_latest}
+        non_hard_methods = [
+            str(item)
+            for item in hard_latest
+            if not is_hard_audit_isolation_method(str(item).split(":", 1)[1] if ":" in str(item) else "")
+        ]
+        if non_hard_methods:
+            return "High-stakes external red-team hard isolation requires container/VM methods, not advisory isolation: " + ", ".join(non_hard_methods)
+        expected_hard = {
+            f"{worker}@round{round_number}"
+            for worker in latest_external_executed
+            for round_number in range(1, int(latest.get("rounds") or 0) + 1)
+        }
+        missing = sorted(expected_hard - hard_latest_rounds)
+        if missing:
+            return "High-stakes external red-team GO requires latest ledger-backed hard-isolation bindings: " + ", ".join(missing)
+        attestation_paths = latest.get("audit_isolation_attestations", [])
+        if not isinstance(attestation_paths, list) or not attestation_paths:
+            return "High-stakes external red-team GO requires ledger-backed audit isolation attestation artifacts"
+        attestation_events = [
+            event for event in events
+            if event.get("event") == "redteam.isolation_attestation_written"
+            and event.get("hard_isolation") is True
+        ]
+        if not attestation_events:
+            return "High-stakes external red-team GO requires hard audit isolation attestation ledger events"
     completed_workers = [
         event for event in events
         if event.get("event") == "worker.completed"
@@ -1567,6 +1609,13 @@ def _actor_proof_error(run_id: str, finding_id: str, actor: str, proof: str | No
     if not hmac.compare_digest(proof, expected):
         return "Actor proof verification failed"
     return None
+
+
+def _load_release_policy_snapshot(run_dir: Path, repo: Path, profile: str) -> dict[str, Any]:
+    snapshot = run_dir / "artifacts" / "policy" / "snapshot.json"
+    if snapshot.exists():
+        return read_json(snapshot, load_policy(repo, profile))
+    return load_policy(repo, profile)
 
 
 def _key_path_inside_boundary(key_path: Path, repo: Path | None, run_dir: Path | None) -> bool:
@@ -2450,8 +2499,13 @@ def _create_run(
     run_dir.mkdir(parents=True, exist_ok=True)
     store.save_plan(plan)
     store.save_findings(run_id, [])
-    write_prompt_bundle(run_dir, plan)
     ledger = Ledger(run_dir, run_id)
+    prompt_paths = write_prompt_bundle(run_dir, plan)
+    prompt_manifest: dict[str, str] = {}
+    for name in sorted(prompt_paths):
+        path = Path(prompt_paths[name])
+        content = path.read_text(encoding="utf-8")
+        prompt_manifest[name] = redteam_prompt_binding_sha256(content) if name == "redteam_prompt.md" else hashlib.sha256(content.encode("utf-8")).hexdigest()
     ledger.event(
         "run.created",
         feature=feature,
@@ -2459,6 +2513,19 @@ def _create_run(
         policy_profile=policy_profile,
         repo=str(repo),
         repo_sha256=_repo_identity_sha256(repo),
+    )
+    ledger.artifact(
+        "artifacts/prompts/manifest.json",
+        json.dumps({"schema_version": 1, "prompts": prompt_manifest}, indent=2, sort_keys=True) + "\n",
+        event="prompts.manifest_written",
+        redact=False,
+    )
+    ledger.artifact(
+        "artifacts/policy/snapshot.json",
+        json.dumps(policy, indent=2, sort_keys=True) + "\n",
+        event="policy.snapshot_written",
+        redact=False,
+        policy_profile=policy_profile,
     )
     ledger.event("classification.completed", classification=context)
     return plan, run_dir, None
@@ -2918,6 +2985,402 @@ def command_worker(args: argparse.Namespace) -> int:
     return 0 if (not args.execute or result.returncode in {0, None}) else int(result.returncode or 1)
 
 
+PROMPT_RUN_REQUIRED_FILE_RE = re.compile(r"^\s*-\s+`?([A-Za-z0-9_./-]+\.(?:md|json|txt|yaml|yml))`?\s*$")
+
+
+def _prompt_run_feature(prompt_text: str, prompt_path: Path, request: str | None) -> str:
+    if request:
+        return request
+    for line in prompt_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            return stripped.removeprefix("# ").strip()[:180] or prompt_path.stem
+    return prompt_path.stem.replace("-", " ").replace("_", " ").strip() or "Prompt run"
+
+
+def _required_output_paths_from_prompt(prompt_text: str) -> list[str]:
+    paths: list[str] = []
+    seen: set[str] = set()
+    in_required_section = False
+    for line in prompt_text.splitlines():
+        stripped = line.strip()
+        lower = stripped.lower()
+        if lower.startswith("create these files under "):
+            in_required_section = True
+            continue
+        if in_required_section and lower.startswith("optional"):
+            in_required_section = False
+            continue
+        if stripped.startswith("## "):
+            heading = stripped.strip("# ").lower()
+            in_required_section = "required output" in heading or "required files" in heading
+            continue
+        if not in_required_section:
+            continue
+        match = PROMPT_RUN_REQUIRED_FILE_RE.match(line)
+        if match:
+            rel = match.group(1)
+            if rel not in seen:
+                paths.append(rel)
+                seen.add(rel)
+    return paths
+
+
+def _prompt_run_progress(
+    ledger: Ledger,
+    *,
+    phase: str,
+    status: str,
+    phases: list[dict[str, object]],
+    detail: str = "",
+    extra: dict[str, object] | None = None,
+) -> None:
+    item: dict[str, object] = {"phase": phase, "status": status, "ts": now_iso()}
+    if detail:
+        item["detail"] = detail
+    if extra:
+        item.update(extra)
+    phases.append(item)
+    ledger.event("prompt_run.phase", phase=phase, status=status, detail=detail, **(extra or {}))
+    ledger.artifact(
+        "artifacts/prompt-run/progress.json",
+        json.dumps({"schema_version": 1, "phases": phases}, indent=2, sort_keys=True) + "\n",
+        event="prompt_run.progress_written",
+        redact=False,
+        phase=phase,
+        status=status,
+    )
+
+
+def _checkout_prompt_run_branch(repo: Path, run_id: str, branch_name: str | None) -> tuple[bool, str, str]:
+    if not is_git_repo(repo):
+        return False, "", "Target repository is not a Git repository."
+    branch = branch_name or f"sdlc/{run_id}"
+    exists = run_cmd(["git", "rev-parse", "--verify", branch], repo)
+    command = ["git", "checkout", branch] if exists["returncode"] == 0 else ["git", "checkout", "-b", branch]
+    result = run_cmd(command, repo, timeout=120)
+    if result["returncode"] != 0:
+        return False, branch, str(result.get("stderr") or result.get("stdout") or "git checkout failed")
+    return True, branch, ""
+
+
+def _repo_snapshot_changes(repo: Path, before: dict[str, bytes]) -> list[str]:
+    after = _repo_content_snapshot(repo)
+    changed = {path for path, content in after.items() if before.get(path) != content}
+    changed.update(path for path in before if path not in after)
+    return sorted(changed)
+
+
+def _validate_prompt_required_outputs(repo: Path, required_paths: list[str]) -> tuple[list[str], list[str]]:
+    missing: list[str] = []
+    invalid: list[str] = []
+    for rel in required_paths:
+        resolved, error = resolve_under_base(repo, Path(rel), must_exist=True)
+        if error or resolved is None or not resolved.is_file():
+            missing.append(rel)
+            continue
+        if resolved.suffix == ".json":
+            try:
+                json.loads(resolved.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as exc:
+                invalid.append(f"{rel}: {exc}")
+    return missing, invalid
+
+
+def _supervised_prompt_text(
+    *,
+    prompt_text: str,
+    repo: Path,
+    read_only_repos: list[Path],
+    required_paths: list[str],
+    commit_requested: bool,
+    allow_production_read: bool,
+) -> str:
+    read_only_text = "\n".join(f"- {path}" for path in read_only_repos) or "- <none>"
+    required_text = "\n".join(f"- {path}" for path in required_paths) or "- <not declared in prompt>"
+    commit_text = "The orchestrator will commit after validation." if commit_requested else "Do not commit; the orchestrator will leave changes for review."
+    production_text = (
+        "Read-only production evidence access is explicitly allowed by this run."
+        if allow_production_read
+        else "Do not SSH to, query, or read production hosts; use local repositories only."
+    )
+    return "\n".join([
+        "# SDLC Supervised Prompt Run",
+        "",
+        f"Target repository: `{repo}`",
+        "",
+        "The SDLC orchestrator is authoritative. The user prompt below is the mission, but these controls override it:",
+        "",
+        "- Do not deploy, restart production services, place orders, mutate live trading state, or push to a remote.",
+        "- Write only the requested deliverables in the target repository unless the prompt explicitly requires supporting docs.",
+        "- Treat every extra repository as read-only evidence. Do not edit it.",
+        f"- {production_text}",
+        "- Do not store secrets in files, prompts, logs, commits, or run artifacts.",
+        "- Mark unsupported trading, profitability, production-readiness, safety, or compliance claims as evidence gaps.",
+        f"- {commit_text}",
+        "",
+        "Read-only evidence repositories:",
+        read_only_text,
+        "",
+        "Required output paths parsed by SDLC:",
+        required_text,
+        "",
+        "---",
+        "",
+        prompt_text,
+    ])
+
+
+def _prompt_run_commit(repo: Path, ledger: Ledger, message: str) -> tuple[bool, str]:
+    add = run_cmd(["git", "add", "docs", ".codex/prompts"], repo, timeout=120)
+    if add["returncode"] != 0:
+        reason = str(add.get("stderr") or add.get("stdout") or "git add failed")
+        ledger.event("prompt_run.commit_failed", reason=reason, command=add.get("cmd"))
+        return False, reason
+    staged = run_cmd(["git", "diff", "--cached", "--quiet"], repo, timeout=120)
+    if staged["returncode"] == 0:
+        ledger.event("prompt_run.commit_skipped", reason="No staged docs or prompt changes.")
+        return True, "No staged docs or prompt changes."
+    commit = run_cmd(["git", "commit", "-m", message], repo, timeout=120)
+    if commit["returncode"] != 0 and "Author identity unknown" in str(commit.get("stderr") or commit.get("stdout") or ""):
+        ledger.event(
+            "prompt_run.commit_identity_fallback",
+            reason="Repository has no git author identity; retrying with non-persistent SDLC commit author.",
+        )
+        commit = run_cmd([
+            "git",
+            "-c",
+            "user.name=SDLC Orchestrator",
+            "-c",
+            "user.email=sdlc@example.local",
+            "commit",
+            "-m",
+            message,
+        ], repo, timeout=120)
+    if commit["returncode"] != 0:
+        reason = str(commit.get("stderr") or commit.get("stdout") or "git commit failed")
+        ledger.event("prompt_run.commit_failed", reason=reason, command=commit.get("cmd"))
+        return False, reason
+    ledger.event("prompt_run.commit_completed", message=message, stdout=commit.get("stdout", ""))
+    return True, str(commit.get("stdout") or "").strip()
+
+
+def command_prompt(args: argparse.Namespace) -> int:
+    if args.prompt_command != "run":
+        eprint(f"Unknown prompt command: {args.prompt_command}")
+        return 2
+    repo = Path(args.repo).resolve()
+    prompt_path = Path(args.prompt_file).expanduser().resolve(strict=False)
+    if not prompt_path.is_file():
+        eprint(f"Prompt file not found: {prompt_path}")
+        return 2
+    prompt_text = prompt_path.read_text(encoding="utf-8")
+    feature = _prompt_run_feature(prompt_text, prompt_path, args.request)
+    run_id = args.run_id or _plan_run_id(feature)
+    try:
+        validate_run_id(run_id)
+    except ValueError as exc:
+        eprint(str(exc))
+        return 2
+
+    branch_name = ""
+    if not args.no_branch:
+        branch_created, branch_name, branch_error = _checkout_prompt_run_branch(repo, run_id, args.branch_name)
+        if not branch_created:
+            eprint(branch_error)
+            return 3
+
+    plan, run_dir, error = _create_run(
+        repo,
+        feature=feature,
+        risk=args.risk,
+        ui=args.ui,
+        security=args.security,
+        infra=args.infra,
+        policy_profile=args.policy,
+        run_id=run_id,
+        production_rollout_allowed_flag=False,
+        allow_main_push_flag=False,
+    )
+    if error or plan is None or run_dir is None:
+        eprint(error or "Unable to create prompt run")
+        return 2
+
+    store = RunStore(repo)
+    ledger = Ledger(run_dir, run_id)
+    phases: list[dict[str, object]] = []
+    _prompt_run_progress(
+        ledger,
+        phase="bootstrap",
+        status="GO",
+        phases=phases,
+        detail="Run initialized and prompt run branch prepared.",
+        extra={"branch": branch_name or plan.branch, "prompt_file": str(prompt_path)},
+    )
+
+    required_paths = _required_output_paths_from_prompt(prompt_text)
+    source_rel = ledger.artifact(
+        f"prompts/{prompt_path.name}",
+        prompt_text,
+        event="prompt_run.source_prompt_imported",
+        redact=True,
+        source_prompt=str(prompt_path),
+    )
+    read_only_repos = [Path(item).expanduser().resolve(strict=False) for item in args.read_only_repo]
+    supervised = _supervised_prompt_text(
+        prompt_text=prompt_text,
+        repo=repo,
+        read_only_repos=read_only_repos,
+        required_paths=required_paths,
+        commit_requested=args.commit,
+        allow_production_read=args.allow_production_read,
+    )
+    supervised_rel = ledger.artifact(
+        "prompts/prompt_run.md",
+        supervised,
+        event="prompt_run.supervised_prompt_written",
+        redact=True,
+        source_prompt_artifact=source_rel,
+        required_outputs=required_paths,
+        read_only_repos=[str(path) for path in read_only_repos],
+    )
+    _prompt_run_progress(
+        ledger,
+        phase="prompt_import",
+        status="GO",
+        phases=phases,
+        detail=f"Imported prompt and parsed {len(required_paths)} required output path(s).",
+        extra={"prompt_artifact": supervised_rel, "required_outputs": required_paths},
+    )
+
+    missing_read_repos = [str(path) for path in read_only_repos if not path.exists()]
+    if missing_read_repos:
+        reason = "Read-only repo path(s) do not exist: " + ", ".join(missing_read_repos)
+        _prompt_run_progress(ledger, phase="read_only_repo_preflight", status="NO_GO", phases=phases, detail=reason)
+        eprint(reason)
+        return 2
+    read_only_before = {str(path): _repo_content_snapshot(path) for path in read_only_repos if path.is_dir()}
+
+    policy = load_policy(repo, plan.policy_profile)
+    policy_error = _worker_execution_policy_error(policy, execute=args.execute, allow_network=args.allow_network)
+    if policy_error:
+        _prompt_run_progress(ledger, phase="worker_execute", status="NO_GO", phases=phases, detail=policy_error)
+        eprint(policy_error)
+        return 3
+    adapter = adapter_from_policy(args.worker, policy)
+    if adapter is None:
+        reason = f"Unknown worker: {args.worker}"
+        _prompt_run_progress(ledger, phase="worker_execute", status="NO_GO", phases=phases, detail=reason)
+        eprint(reason)
+        return 2
+
+    _prompt_run_progress(
+        ledger,
+        phase="worker_execute",
+        status="RUNNING" if args.execute else "DRY_RUN",
+        phases=phases,
+        detail=f"Invoking {args.worker} with timeout {args.timeout}s.",
+        extra={"worker": args.worker, "execute": args.execute},
+    )
+    old_extra = getattr(adapter, "_sdlc_extra_read_dirs", None)
+    setattr(adapter, "_sdlc_extra_read_dirs", read_only_repos)
+    try:
+        result = adapter.run(run_dir / supervised_rel, repo, args.mode, execute=args.execute, timeout=args.timeout)
+    finally:
+        if old_extra is None:
+            if hasattr(adapter, "_sdlc_extra_read_dirs"):
+                delattr(adapter, "_sdlc_extra_read_dirs")
+        else:
+            setattr(adapter, "_sdlc_extra_read_dirs", old_extra)
+
+    captured = capture_worker_result(
+        run_dir=run_dir,
+        mode=args.mode,
+        prompt_path=run_dir / supervised_rel,
+        result=result,
+        ledger=ledger,
+        label="prompt-run",
+    )
+    read_only_violations: list[str] = []
+    for path_text, before in read_only_before.items():
+        path = Path(path_text)
+        changes = _repo_snapshot_changes(path, before)
+        if changes:
+            restored = _restore_repo_snapshot_paths(path, before, changes)
+            read_only_violations.extend(f"{path}:{rel}" for rel in changes)
+            ledger.event("prompt_run.read_only_repo_violation", repo=str(path), changed_paths=changes, restored_paths=restored)
+    worker_status = "GO" if result.returncode in {0, None} and not read_only_violations else "NO_GO"
+    _prompt_run_progress(
+        ledger,
+        phase="worker_execute",
+        status=worker_status,
+        phases=phases,
+        detail=f"Worker return code: {result.returncode}",
+        extra={"worker_result": captured.get("result_path"), "read_only_violations": read_only_violations},
+    )
+    if worker_status != "GO":
+        generate_report(repo, run_id, verdict_override="NO_GO")
+        print(f"Run ID: {run_id}")
+        print(f"Report: {run_dir / 'final-report.md'}")
+        return 1
+
+    missing, invalid = _validate_prompt_required_outputs(repo, required_paths)
+    validation_status = "GO" if not missing and not invalid else "NO_GO"
+    _prompt_run_progress(
+        ledger,
+        phase="deliverable_validation",
+        status=validation_status,
+        phases=phases,
+        detail=f"Missing={len(missing)} invalid_json={len(invalid)}",
+        extra={"missing": missing, "invalid": invalid},
+    )
+    if validation_status != "GO":
+        generate_report(repo, run_id, verdict_override="NO_GO")
+        print(f"Run ID: {run_id}")
+        print(f"Missing outputs: {', '.join(missing) if missing else '<none>'}")
+        print(f"Invalid outputs: {', '.join(invalid) if invalid else '<none>'}")
+        print(f"Report: {run_dir / 'final-report.md'}")
+        return 1
+
+    commit_detail = "Commit not requested."
+    if args.commit:
+        ok, commit_detail = _prompt_run_commit(repo, ledger, args.commit_message)
+        _prompt_run_progress(ledger, phase="commit", status="GO" if ok else "NO_GO", phases=phases, detail=commit_detail)
+        if not ok:
+            generate_report(repo, run_id, verdict_override="NO_GO")
+            print(f"Run ID: {run_id}")
+            print(f"Commit failed: {commit_detail}")
+            print(f"Report: {run_dir / 'final-report.md'}")
+            return 1
+    else:
+        _prompt_run_progress(ledger, phase="commit", status="SKIPPED", phases=phases, detail=commit_detail)
+
+    run_dry_gates(store, run_id)
+    report = generate_report(repo, run_id)
+    _prompt_run_progress(ledger, phase="final_report", status="GO", phases=phases, detail=report)
+
+    payload = {
+        "run_id": run_id,
+        "repo": str(repo),
+        "branch": branch_name or plan.branch,
+        "prompt": str(prompt_path),
+        "worker_result": captured.get("result_path"),
+        "required_outputs": required_paths,
+        "report": str(run_dir / "final-report.md"),
+        "commit": commit_detail,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"Run ID: {run_id}")
+        print(f"Branch: {payload['branch']}")
+        print(f"Worker result: {payload['worker_result']}")
+        print(f"Required outputs: {len(required_paths)}")
+        print(f"Report: {payload['report']}")
+        print(f"Progress: {run_dir / 'artifacts' / 'prompt-run' / 'progress.json'}")
+    return 0
+
+
 def command_redteam(args: argparse.Namespace) -> int:
     repo = Path(args.repo).resolve()
     store = RunStore(repo)
@@ -3047,6 +3510,60 @@ def _policy_redteam_workers(policy: dict[str, Any]) -> list[str]:
         if redteam_worker:
             return [redteam_worker]
     return ["codex"]
+
+
+def command_isolation(args: argparse.Namespace) -> int:
+    repo = Path(args.repo).resolve()
+    store = RunStore(repo)
+    plan = store.load_plan(args.run_id)
+    policy = load_policy(repo, plan.policy_profile)
+    workers = [worker.strip() for worker in args.workers.split(",") if worker.strip()] if args.workers else _policy_redteam_workers(policy)
+    prompt_manifest = read_json(store.run_dir(args.run_id) / "artifacts" / "prompts" / "manifest.json", {})
+    prompt_sha256 = str(prompt_manifest.get("redteam_prompt.md") or "") if isinstance(prompt_manifest, dict) else ""
+    results = []
+    for worker in workers:
+        adapter = adapter_from_policy(worker, policy)
+        provider = str(getattr(adapter, "provider", "unknown")).strip().lower() if adapter is not None else "unknown"
+        if adapter is None:
+            results.append({
+                "worker": worker,
+                "provider": provider,
+                "available": False,
+                "hard_isolation": False,
+                "advisory_isolation": False,
+                "method": None,
+                "reason": "Unknown worker.",
+            })
+            continue
+        preflight = audit_isolation_preflight(
+            policy=policy,
+            repo=repo,
+            worker=worker,
+            provider=provider,
+            prompt_sha256=prompt_sha256,
+            allow_network=args.allow_network,
+        )
+        results.append({
+            "worker": worker,
+            "provider": provider,
+            "requested_kind": preflight.requested_kind,
+            "runtime_kind": preflight.runtime_kind,
+            "method": preflight.method,
+            "available": preflight.available,
+            "hard_isolation": preflight.hard_isolation,
+            "advisory_isolation": preflight.advisory_isolation,
+            "network_mode": preflight.network_mode,
+            "auth_mode": preflight.auth_mode,
+            "reason": preflight.reason,
+        })
+    payload = {"run_id": args.run_id, "workers": results}
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        for item in results:
+            status = "HARD" if item.get("hard_isolation") else "ADVISORY" if item.get("advisory_isolation") else "UNAVAILABLE"
+            print(f"{item['worker']}: {status} method={item.get('method') or '<none>'} reason={item.get('reason')}")
+    return 0 if all(item.get("hard_isolation") for item in results) else 1
 
 
 def _find_finding(findings: list[Finding], finding_id: str) -> Finding:
@@ -4498,6 +5015,31 @@ def build_parser() -> argparse.ArgumentParser:
     p_worker.add_argument("--timeout", type=int, default=120, help="Per-worker timeout in seconds. Default: 120.")
     p_worker.set_defaults(func=command_worker)
 
+    p_prompt = sub.add_parser("prompt", help="Run an external prompt under SDLC supervision")
+    prompt_sub = p_prompt.add_subparsers(dest="prompt_command", required=True)
+    prompt_run = prompt_sub.add_parser("run", help="Import, execute, validate, report, and optionally commit a prompt run")
+    prompt_run.add_argument("prompt_file", help="Path to the prompt file to execute")
+    prompt_run.add_argument("--request", help="Override the run feature/request text derived from the prompt heading")
+    prompt_run.add_argument("--risk", default="high", choices=["auto", "low", "medium", "high", "extreme"])
+    prompt_run.add_argument("--ui", default="auto", choices=["auto", "yes", "no"])
+    prompt_run.add_argument("--security", default="auto", choices=["auto", "yes", "no"])
+    prompt_run.add_argument("--infra", default="auto", choices=["auto", "yes", "no"])
+    prompt_run.add_argument("--policy", default="host-oauth-tools")
+    prompt_run.add_argument("--run-id")
+    prompt_run.add_argument("--worker", default="codex")
+    prompt_run.add_argument("--mode", default="BUILD", choices=["READ_ONLY", "PLAN", "BUILD", "TEST", "SECURITY_REVIEW", "FIX"])
+    prompt_run.add_argument("--read-only-repo", action="append", default=[], help="Additional evidence repo exposed to the worker and restored if mutated. Repeatable.")
+    prompt_run.add_argument("--allow-production-read", action="store_true", help="Allow explicitly read-only production evidence access requested by the prompt. Default forbids production host access.")
+    prompt_run.add_argument("--execute", action="store_true", help="Actually invoke the worker. Default is dry-run evidence capture.")
+    prompt_run.add_argument("--allow-network", action="store_true", help="Required with --execute because host model CLIs use network/OAuth.")
+    prompt_run.add_argument("--timeout", type=int, default=14400, help="Worker timeout in seconds. Default: 14400.")
+    prompt_run.add_argument("--no-branch", action="store_true", help="Do not create or switch to sdlc/<run-id> before running.")
+    prompt_run.add_argument("--branch-name", help="Feature branch name to create/switch to. Defaults to sdlc/<run-id>.")
+    prompt_run.add_argument("--commit", action="store_true", help="Commit docs and .codex/prompts after validation.")
+    prompt_run.add_argument("--commit-message", default="docs: add s4 clean-room review plan")
+    prompt_run.add_argument("--json", action="store_true")
+    prompt_run.set_defaults(func=command_prompt)
+
     p_redteam = sub.add_parser("redteam", help="Run deterministic or explicit worker red-team evidence")
     p_redteam.add_argument("redteam_args", nargs="+", metavar="run_id|execute")
     p_redteam.add_argument("--workers", default="", help="Comma-separated worker families for `redteam execute`; defaults to policy redteam.default_workers")
@@ -4510,6 +5052,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_redteam.add_argument("--fail-on-findings", action="store_true", help="Return non-zero when red-team execution leaves a NO_GO gate")
     p_redteam.add_argument("--allow-no-go-exit-zero", action="store_true", help="Compatibility escape hatch: return zero on NO_GO and record a ledger bypass event.")
     p_redteam.set_defaults(func=command_redteam)
+
+    p_isolation = sub.add_parser("isolation", help="Preflight audit worker hard-isolation runtime availability")
+    isolation_sub = p_isolation.add_subparsers(dest="isolation_command", required=True)
+    i_preflight = isolation_sub.add_parser("preflight", help="Dry-run audit isolation runtime selection and qualification")
+    i_preflight.add_argument("run_id")
+    i_preflight.add_argument("--workers", help="Comma-separated worker families. Defaults to policy red-team workers.")
+    i_preflight.add_argument("--allow-network", action="store_true", help="Evaluate the policy-bound network mode used for executed workers.")
+    i_preflight.add_argument("--json", action="store_true")
+    i_preflight.set_defaults(func=command_isolation)
 
     p_scan = sub.add_parser("scan", help="Run security scanners and capture evidence")
     p_scan.add_argument("run_id")

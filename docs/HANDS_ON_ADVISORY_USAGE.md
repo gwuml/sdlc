@@ -28,13 +28,32 @@ Do not hide missing tools, scanner failures, failed tests, unavailable workers, 
 
 ## External Red-Team Workers
 
-For high-stakes runs, external model workers are blocked unless hard read-only source isolation is available. Set the following only when an external sandbox, container, or mount enforces a non-mutable source view:
+For high-stakes runs, external model workers are blocked unless a qualifying container/VM audit runtime is available. The hard-isolation contract requires a read-only source mount, a live source-write probe, isolated `HOME`, ephemeral writable temp/cache paths, no host credential directory mounts, explicit policy-bound network mode, brokered/scoped/absent auth, process containment, cleanup evidence, and a ledger-backed attestation artifact.
 
-```bash
-export SDLC_AUDIT_HARD_SOURCE_ISOLATION=1
+Configure the runtime in `.sdlc/policies/<profile>.json`:
+
+```json
+{
+  "redteam": {
+    "audit_isolation": {
+      "runtime": "container",
+      "container_engine": "auto",
+      "container_image": "your-audit-worker-image@sha256:<digest>",
+      "network_mode": "none",
+      "auth": {"mode": "brokered"},
+      "auth_env": ["SDLC_AUDIT_BROKER_URL"]
+    }
+  }
+}
 ```
 
-This flag is an assertion by the operator. It is not a sandbox by itself. If hard isolation is unavailable, use the product for advisory workflow and keep the red-team gate `NO_GO`.
+Run the non-interactive preflight before executed external red-team work:
+
+```bash
+python -m sdlc isolation preflight <run-id> --workers openai-codex-primary,openai-codex-adversary --json
+```
+
+On macOS, `sandbox-exec` may still be used as advisory source-write protection, but it is not counted as hard audit isolation unless strict host-read and credential containment can be attested. An environment flag alone is not accepted. If container/VM hard isolation is unavailable, use the product for advisory workflow and keep the red-team gate `NO_GO`. Prompt compliance alone is not a security boundary.
 
 ## Safe Iteration Loop
 
