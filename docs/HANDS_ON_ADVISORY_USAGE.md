@@ -14,6 +14,13 @@ python -m sdlc report hands-on-advisory --print
 
 Use `status` and `next` to decide the next hands-on task. The orchestrator should show `Authority mode: ADVISORY` until blockers are gone. Even then, production authority remains disabled unless a human release owner explicitly approves deployment and records rollback evidence.
 
+`sdlc run` performs a full no-worker advisory pass. It creates architecture,
+implementation, QA, and red-team gate artifacts even when Codex/Claude workers
+are not executed. Gates with real local evidence can become `GO`; gates that
+need an implementation diff, executed independent red-team, provenance, or human
+release evidence are marked `NO_GO`/`FIX_REQUIRED` with concrete next steps
+rather than being left pending.
+
 ## Required Local Checks
 
 Before presenting a run as complete:

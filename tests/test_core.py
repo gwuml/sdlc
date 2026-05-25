@@ -371,6 +371,34 @@ class CoreTests(unittest.TestCase):
             self.assertTrue((store.run_dir(run_id) / "prompts" / "execution_prompt.md").exists())
             self.assertEqual(main(["--repo", str(repo), "validate", "--run-id", run_id]), 0)
 
+    def test_prompt_run_required_outputs_include_source_files(self) -> None:
+        prompt = """
+## Required Deliverables
+
+- `docs/report.md`
+- `Cargo.toml`
+- `crates/mango-domain/src/lib.rs`
+- `services/mcp-server/main.go`
+- `apps/operator-console/src/App.tsx`
+- `schemas/mango.events.proto`
+- `migrations/0001_event_log.sql`
+- `Makefile`
+
+Optional:
+- `optional.md`
+"""
+        paths = cli_module._required_output_paths_from_prompt(prompt)
+        self.assertEqual(paths, [
+            "docs/report.md",
+            "Cargo.toml",
+            "crates/mango-domain/src/lib.rs",
+            "services/mcp-server/main.go",
+            "apps/operator-console/src/App.tsx",
+            "schemas/mango.events.proto",
+            "migrations/0001_event_log.sql",
+            "Makefile",
+        ])
+
     def test_ledger_provenance_accepts_only_canonical_artifact_events(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             run_id = "ledger-provenance"
@@ -1808,6 +1836,25 @@ class CoreTests(unittest.TestCase):
             repo_context = next(gate for gate in plan.gates if gate.id == "repo_context_env_branch")
             self.assertEqual(repo_context.state, "BLOCKED")
             self.assertIn("intake_scope", repo_context.notes)
+
+    def test_command_run_full_advisory_creates_role_artifacts_without_workers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            run_id = "advisory-full-pass"
+            self.assertEqual(main(["--repo", str(repo), "init"]), 0)
+            self.assertEqual(main(["--repo", str(repo), "plan", "Build S4 replay UI", "--run-id", run_id, "--ui", "yes", "--security", "yes"]), 0)
+            self.assertEqual(main(["--repo", str(repo), "run", run_id]), 0)
+            store = RunStore(repo)
+            plan = store.load_plan(run_id)
+            by_id = {gate.id: gate for gate in plan.gates}
+            self.assertEqual(by_id["architecture_contracts"].verdict, "GO")
+            self.assertEqual(by_id["implementation"].verdict, "NO_GO")
+            self.assertEqual(by_id["qa_tests_integration_smoke"].verdict, "NO_GO")
+            self.assertEqual(by_id["independent_redteam_cross_model"].verdict, "NO_GO")
+            for gate_id in ("architecture_contracts", "implementation", "qa_tests_integration_smoke", "independent_redteam_cross_model"):
+                artifact = store.run_dir(run_id) / "artifacts" / f"{gate_id}.md"
+                self.assertTrue(artifact.exists(), gate_id)
+                self.assertIn("Advisory", artifact.read_text(encoding="utf-8"))
 
     def test_dry_run_git_context_no_go_without_git_repo(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

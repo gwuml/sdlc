@@ -86,7 +86,7 @@ python -m sdlc plan "Build multi-tenant RBAC dashboard with audit logs" \
 # 3. Inspect status
 python -m sdlc status <run-id>
 
-# 4. Advance deterministic dry gates
+# 4. Advance deterministic dry gates and full advisory role artifacts
 python -m sdlc run <run-id> --redteam
 
 # 5. Capture security scanner evidence
@@ -108,6 +108,11 @@ python -m sdlc validate --run-id <run-id> --release
 ```
 
 By default, worker commands are **dry-run only**. Use `--execute` explicitly if you want the adapter to call Codex or Claude.
+The local `run` command now performs a full advisory pass: it creates
+architecture/dev/QA/red-team gate artifacts without external workers, runs
+available deterministic local checks, and marks unsupported implementation or
+independent red-team gates `NO_GO` instead of leaving them invisible or falsely
+complete.
 
 By default, network scanners are blocked by policy. `pip-audit` only runs when both
 `--allow-network` is passed and the active policy has `network_allowed=true`.

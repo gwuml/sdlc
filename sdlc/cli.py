@@ -2595,6 +2595,9 @@ def command_start(args: argparse.Namespace) -> int:
         eprint(error or "Unable to create run")
         return 2
     result = _write_autopilot_artifacts(repo, plan, run_dir, include_agent_plan=True, parallel=args.parallel)
+    store = RunStore(repo)
+    run_dry_gates(store, plan.run_id, full_advisory=True)
+    result["next_action"] = _next_action_payload(repo, plan.run_id, persist=True)
     output = {
         "run_id": plan.run_id,
         "risk_level": plan.risk_level,
@@ -2882,11 +2885,11 @@ def _gate_next_action(plan: RunPlan, gate: GateState) -> dict[str, object]:
 def command_run(args: argparse.Namespace) -> int:
     repo = Path(args.repo).resolve()
     store = RunStore(repo)
-    plan = run_dry_gates(store, args.run_id)
+    plan = run_dry_gates(store, args.run_id, full_advisory=True)
     if args.redteam:
         create_redteam_findings(store, args.run_id)
     _print_status(plan)
-    print("\nRun advanced. Real implementation/red-team gates require worker execution or human evidence.")
+    print("\nRun advanced with a full advisory pass. Release-grade implementation/red-team gates still require worker execution or human evidence.")
     return 0
 
 
@@ -2985,7 +2988,9 @@ def command_worker(args: argparse.Namespace) -> int:
     return 0 if (not args.execute or result.returncode in {0, None}) else int(result.returncode or 1)
 
 
-PROMPT_RUN_REQUIRED_FILE_RE = re.compile(r"^\s*-\s+`?([A-Za-z0-9_./-]+\.(?:md|json|txt|yaml|yml))`?\s*$")
+PROMPT_RUN_REQUIRED_FILE_RE = re.compile(
+    r"^\s*-\s+`?((?:[A-Za-z0-9_./-]+\.(?:md|json|txt|yaml|yml|toml|rs|go|ts|tsx|js|jsx|proto|sql|html|css))|(?:[A-Za-z0-9_./-]+/)?(?:Makefile|Dockerfile))`?\s*$"
+)
 
 
 def _prompt_run_feature(prompt_text: str, prompt_path: Path, request: str | None) -> str:
@@ -3013,7 +3018,7 @@ def _required_output_paths_from_prompt(prompt_text: str) -> list[str]:
             continue
         if stripped.startswith("## "):
             heading = stripped.strip("# ").lower()
-            in_required_section = "required output" in heading or "required files" in heading
+            in_required_section = "required output" in heading or "required files" in heading or "required deliverables" in heading
             continue
         if not in_required_section:
             continue
@@ -3355,7 +3360,7 @@ def command_prompt(args: argparse.Namespace) -> int:
     else:
         _prompt_run_progress(ledger, phase="commit", status="SKIPPED", phases=phases, detail=commit_detail)
 
-    run_dry_gates(store, run_id)
+    run_dry_gates(store, run_id, full_advisory=True)
     report = generate_report(repo, run_id)
     _prompt_run_progress(ledger, phase="final_report", status="GO", phases=phases, detail=report)
 
