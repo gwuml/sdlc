@@ -2888,9 +2888,12 @@ def command_run(args: argparse.Namespace) -> int:
     repo = Path(args.repo).resolve()
     store = RunStore(repo)
     plan = run_dry_gates(store, args.run_id, full_advisory=True)
+    statuses = _materialize_release_gate_evidence(repo, store, args.run_id)
+    plan = store.load_plan(args.run_id)
     if args.redteam:
         create_redteam_findings(store, args.run_id)
     _print_status(plan)
+    _print_materialization_statuses(statuses)
     print("\nRun advanced with a full advisory pass. Release-grade implementation/red-team gates still require worker execution or human evidence.")
     return 0
 
@@ -2927,6 +2930,138 @@ def _refresh_report_if_materialized(repo: Path, store: RunStore, run_id: str, *,
     if not (store.run_dir(run_id) / "final-report.md").exists():
         return
     _refresh_nonfinal_report(repo, store, run_id, reason=reason)
+
+
+def _record_typed_gate_evidence(
+    repo: Path,
+    store: RunStore,
+    run_id: str,
+    gate_id: str,
+    *,
+    actor: str,
+    artifacts: dict[str, str],
+    source_evidence: list[str],
+    notes: str = "",
+) -> tuple[str | None, str | None]:
+    _RUN_EVENTS_CACHE.clear()
+    _ARTIFACT_INDEX_CACHE.clear()
+    gate_definition = _gate_definition(gate_id)
+    required = set(gate_definition.required_artifacts if gate_definition else [])
+    missing = [item for item in sorted(required) if not artifacts.get(item)]
+    if missing:
+        return None, "Gate evidence is missing required artifacts: " + ", ".join(missing)
+    if not source_evidence:
+        return None, "Gate evidence requires at least one source evidence artifact"
+    run_dir = store.run_dir(run_id)
+    artifact_bindings, artifact_error = _build_gate_artifact_bindings(repo, run_dir, gate_id, artifacts, source_evidence)
+    if artifact_error:
+        return None, artifact_error
+    source_evidence_bindings, source_error = _build_source_evidence_bindings(repo, run_dir, source_evidence)
+    if source_error:
+        return None, source_error
+    payload = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "gate_id": gate_id,
+        "actor": actor,
+        "required_artifacts": artifacts,
+        "artifact_bindings": artifact_bindings,
+        "source_evidence": source_evidence,
+        "source_evidence_bindings": source_evidence_bindings,
+        "notes": notes,
+    }
+    artifact = Ledger(run_dir, run_id).artifact(
+        f"artifacts/gates/{gate_id}-evidence.json",
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        event="gate.evidence_recorded",
+        gate=gate_id,
+        actor=actor,
+        artifact_keys=sorted(artifacts),
+        artifact_bindings=artifact_bindings,
+        source_evidence_bindings=source_evidence_bindings,
+    )
+    _RUN_EVENTS_CACHE.clear()
+    _ARTIFACT_INDEX_CACHE.clear()
+    return artifact, None
+
+
+def _materialize_release_gate_evidence(repo: Path, store: RunStore, run_id: str) -> list[dict[str, object]]:
+    from .evidence import materialize_gate_evidence, plan_gate_evidence
+
+    plan = store.load_plan(run_id)
+    ledger = Ledger(store.run_dir(run_id), run_id)
+    statuses: list[dict[str, object]] = []
+    for gate in sorted(plan.gates, key=lambda item: item.order):
+        gate_plan = plan_gate_evidence(repo, run_id, gate.id, actor=gate.owner)
+        if gate.state in {"SKIPPED", "WAIVED"}:
+            statuses.append({"gate_id": gate.id, "status": gate.state, "blockers": []})
+            continue
+        if not gate_plan.auto_completable:
+            statuses.append({"gate_id": gate.id, "status": "NO_GO", "blockers": gate_plan.blockers or ["Gate is not auto-completable."]})
+            continue
+        result = materialize_gate_evidence(
+            repo,
+            run_id,
+            gate.id,
+            actor=gate.owner,
+            source_paths=list(gate.evidence),
+        )
+        evidence_record = None
+        record_error = None
+        if result.artifact_paths and result.source_evidence:
+            evidence_record, record_error = _record_typed_gate_evidence(
+                repo,
+                store,
+                run_id,
+                gate.id,
+                actor=result.actor,
+                artifacts=result.artifact_paths,
+                source_evidence=result.source_evidence,
+                notes="Automatic typed gate evidence materialization.",
+            )
+            result.evidence_record_path = evidence_record
+        blockers = list(result.blockers)
+        if record_error:
+            blockers.append(record_error)
+        evidence_path = f".sdlc/runs/{run_id}/{evidence_record}" if evidence_record else None
+        status = "GO" if result.verdict == "GO" and evidence_path and not blockers else "NO_GO"
+        if evidence_path and status == "GO":
+            release_error = _validate_release_gate_evidence(repo, store.run_dir(run_id), gate, "GO", [evidence_path])
+            if release_error:
+                blockers.append(release_error)
+                status = "NO_GO"
+        current = next((item for item in plan.gates if item.id == gate.id), gate)
+        if evidence_path and status == "GO":
+            current.state = "GO"
+            current.verdict = "GO"
+            if evidence_path not in current.evidence:
+                current.evidence.append(evidence_path)
+            current.notes = "Release-grade typed evidence materialized by the SDLC control plane."
+            ledger.event("gate.evidence_materialized", gate=gate.id, verdict="GO", evidence=evidence_path, artifact_keys=sorted(result.artifact_paths))
+        else:
+            if gate.id in {"deterministic_quality", "qa_tests_integration_smoke"}:
+                current.state = "NO_GO"
+                current.verdict = "NO_GO"
+                if evidence_path and evidence_path not in current.evidence:
+                    current.evidence.append(evidence_path)
+                current.notes = "Evidence materialization could not satisfy release gate: " + "; ".join(blockers)
+            ledger.event("gate.evidence_materialization_blocked", gate=gate.id, blockers=blockers, evidence=evidence_path)
+        statuses.append({
+            "gate_id": gate.id,
+            "status": status,
+            "evidence": evidence_path,
+            "blockers": blockers,
+        })
+    store.save_plan(plan)
+    return statuses
+
+
+def _print_materialization_statuses(statuses: list[dict[str, object]]) -> None:
+    print("\nGate evidence materialization:")
+    for item in statuses:
+        gate_id = str(item.get("gate_id", ""))
+        status = str(item.get("status", "NO_GO"))
+        print(f"  {gate_id}: {status}")
 
 
 def command_worker(args: argparse.Namespace) -> int:
@@ -3363,6 +3498,15 @@ def command_prompt(args: argparse.Namespace) -> int:
         _prompt_run_progress(ledger, phase="commit", status="SKIPPED", phases=phases, detail=commit_detail)
 
     run_dry_gates(store, run_id, full_advisory=True)
+    materialization_statuses = _materialize_release_gate_evidence(repo, store, run_id)
+    _prompt_run_progress(
+        ledger,
+        phase="gate_evidence_materialization",
+        status="GO" if any(item.get("status") == "GO" for item in materialization_statuses) else "NO_GO",
+        phases=phases,
+        detail="Typed gate evidence materialization attempted for auto-completable gates.",
+        extra={"gates": materialization_statuses},
+    )
     report = generate_report(repo, run_id)
     _prompt_run_progress(ledger, phase="final_report", status="GO", phases=phases, detail=report)
 
@@ -3373,6 +3517,7 @@ def command_prompt(args: argparse.Namespace) -> int:
         "prompt": str(prompt_path),
         "worker_result": captured.get("result_path"),
         "required_outputs": required_paths,
+        "gate_evidence_materialization": materialization_statuses,
         "report": str(run_dir / "final-report.md"),
         "commit": commit_detail,
     }
@@ -3383,6 +3528,7 @@ def command_prompt(args: argparse.Namespace) -> int:
         print(f"Branch: {payload['branch']}")
         print(f"Worker result: {payload['worker_result']}")
         print(f"Required outputs: {len(required_paths)}")
+        _print_materialization_statuses(materialization_statuses)
         print(f"Report: {payload['report']}")
         print(f"Progress: {run_dir / 'artifacts' / 'prompt-run' / 'progress.json'}")
     return 0
@@ -3731,42 +3877,20 @@ def command_gate(args: argparse.Namespace) -> int:
                 return 2
             key, value = item.split("=", 1)
             artifacts[key.strip()] = value.strip()
-        required = set(gate_definition.required_artifacts if gate_definition else [])
-        missing = [item for item in sorted(required) if not artifacts.get(item)]
-        if missing:
-            eprint("Gate evidence is missing required artifacts: " + ", ".join(missing))
-            return 2
         source_evidence = args.source or []
-        artifact_bindings, artifact_error = _build_gate_artifact_bindings(repo, run_dir, args.gate_id, artifacts, source_evidence)
-        if artifact_error:
-            eprint(artifact_error)
-            return 2
-        source_evidence_bindings, source_error = _build_source_evidence_bindings(repo, run_dir, source_evidence)
-        if source_error:
-            eprint(source_error)
-            return 2
-        payload = {
-            "schema_version": 1,
-            "run_id": args.run_id,
-            "gate_id": args.gate_id,
-            "actor": args.actor,
-            "required_artifacts": artifacts,
-            "artifact_bindings": artifact_bindings,
-            "source_evidence": source_evidence,
-            "source_evidence_bindings": source_evidence_bindings,
-            "notes": args.notes or "",
-        }
-        rel = f"artifacts/gates/{args.gate_id}-evidence.json"
-        artifact = ledger.artifact(
-            rel,
-            json.dumps(payload, indent=2, sort_keys=True) + "\n",
-            event="gate.evidence_recorded",
-            gate=args.gate_id,
+        artifact, evidence_error = _record_typed_gate_evidence(
+            repo,
+            store,
+            args.run_id,
+            args.gate_id,
             actor=args.actor,
-            artifact_keys=sorted(artifacts),
-            artifact_bindings=artifact_bindings,
-            source_evidence_bindings=source_evidence_bindings,
+            artifacts=artifacts,
+            source_evidence=source_evidence,
+            notes=args.notes or "",
         )
+        if evidence_error or artifact is None:
+            eprint(evidence_error or "Unable to record gate evidence")
+            return 2
         print(f"Gate evidence: .sdlc/runs/{args.run_id}/{artifact}")
         _refresh_report_if_materialized(repo, store, args.run_id, reason=f"gate.evidence.{args.gate_id}")
         return 0

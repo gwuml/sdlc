@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import sys
 import json
 import math
 import re
@@ -17,6 +16,7 @@ from typing import Any, Callable
 
 from .adapters import WorkerResult, _ensure_writable_worker_temp_dir, _worker_temp_dir, adapter_from_policy, capture_worker_result, worker_identity_group
 from .audit_runtime import audit_isolation_preflight
+from .evidence import detected_validation_commands
 from .ledger import Ledger
 from .models import RunPlan, Finding, invalid_findings, open_findings, plan_condition_value
 from .policies import load_policy
@@ -189,23 +189,7 @@ def deterministic_artifacts_for_gate(plan: RunPlan, gate_id: str, run_dir: Path,
 
 
 def _detected_validation_commands(repo: Path, *, quality_only: bool = False) -> list[list[str]]:
-    commands: list[list[str]] = []
-    makefile = repo / "Makefile"
-    if makefile.exists():
-        text = makefile.read_text(encoding="utf-8", errors="replace")
-        if re.search(r"^validate:", text, re.MULTILINE):
-            commands.append(["make", "validate"])
-        elif re.search(r"^test:", text, re.MULTILINE):
-            commands.append(["make", "test"])
-    if (repo / "Cargo.toml").exists():
-        commands.append(["cargo", "test"])
-    if (repo / "go.mod").exists():
-        commands.append(["go", "test", "./..."])
-    if (repo / "pyproject.toml").exists() or (repo / "tests").exists():
-        commands.append([sys.executable, "-m", "unittest", "discover", "-s", "tests"])
-    if (repo / "package.json").exists():
-        commands.append(["npm", "test", "--", "--runInBand"])
-    return commands[:2] if quality_only else commands
+    return detected_validation_commands(repo, quality_only=quality_only)
 
 
 def _advisory_gate_lines(plan: RunPlan, gate_id: str, run_dir: Path) -> list[str]:

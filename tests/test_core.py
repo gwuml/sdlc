@@ -23,7 +23,8 @@ from sdlc.adapters import ADAPTERS, ClaudeAdapter, CodexAdapter, GeminiAdapter, 
 from sdlc.audit_runtime import audit_isolation_preflight
 from sdlc.classifier import classify_feature
 from sdlc.attestations import _verify_manifest_entries
-from sdlc.cli import _final_report_attestation_event_error, _ledger_event_records_after_sequence, _ledger_integrity_errors, _release_git_provenance_source_error, _release_readiness_errors, _validate_final_report_gate_completion, _validate_git_provenance_payload, _validate_non_placeholder_evidence, main
+from sdlc.cli import _final_report_attestation_event_error, _ledger_event_records_after_sequence, _ledger_integrity_errors, _release_git_provenance_source_error, _release_readiness_errors, _validate_final_report_gate_completion, _validate_git_provenance_payload, _validate_non_placeholder_evidence, _validate_release_gate_evidence, main
+from sdlc.evidence import detected_validation_commands
 from sdlc.engine import RunStore, _create_audit_workspace, _external_hard_audit_isolation_required, _make_tree_writable, _parse_worker_findings, _prompt_binding_from_text, _repo_snapshot as engine_repo_snapshot, _worker_attested_review, _worker_declared_verdict, final_verdict, run_dry_gates
 from sdlc.ledger import LEDGER_ARTIFACT_SCHEMA, LEDGER_EVENT_SCHEMA, Ledger, canonical_artifact_event, is_canonical_artifact_event, is_canonical_ledger_event, is_origin_authenticated_ledger_event, ledger_event_digest
 from sdlc.memory import export_memory
@@ -1881,6 +1882,73 @@ Optional:
                 self.assertTrue(artifact.exists(), gate_id)
                 self.assertIn("Advisory", artifact.read_text(encoding="utf-8"))
 
+    def test_command_run_materializes_release_grade_gate_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self.assertEqual(run_cmd(["git", "init", "-b", "feature"], repo)["returncode"], 0)
+            self.assertEqual(run_cmd(["git", "config", "user.email", "sdlc@example.test"], repo)["returncode"], 0)
+            self.assertEqual(run_cmd(["git", "config", "user.name", "SDLC Test"], repo)["returncode"], 0)
+            (repo / "README.md").write_text("fixture\n", encoding="utf-8")
+            self.assertEqual(run_cmd(["git", "add", "README.md"], repo)["returncode"], 0)
+            self.assertEqual(run_cmd(["git", "commit", "-m", "chore: fixture"], repo)["returncode"], 0)
+            run_id = "materialized-evidence"
+            self.assertEqual(main(["--repo", str(repo), "init"]), 0)
+            write_json(repo / ".sdlc" / "validation-profile.json", {
+                "quality_commands": [["sh", "-c", "echo quality-ok"]],
+                "qa_commands": [["sh", "-c", "echo qa-ok"]],
+                "python_unittest_required": False,
+            })
+            self.assertEqual(main(["--repo", str(repo), "plan", "Materialize evidence", "--run-id", run_id, "--ui", "no"]), 0)
+            self.assertEqual(main(["--repo", str(repo), "run", run_id]), 0)
+            store = RunStore(repo)
+            plan = store.load_plan(run_id)
+            by_id = {gate.id: gate for gate in plan.gates}
+            for gate_id in ("repo_context_env_branch", "baseline_freeze", "deterministic_quality", "qa_tests_integration_smoke"):
+                gate = by_id[gate_id]
+                evidence = [path for path in gate.evidence if path.endswith(f"{gate_id}-evidence.json")]
+                self.assertTrue(evidence, gate_id)
+                self.assertIsNone(_validate_release_gate_evidence(repo, store.run_dir(run_id), gate, "GO", evidence))
+            quality_text = (store.run_dir(run_id) / "artifacts" / "gates" / "deterministic_quality" / "format_result.md").read_text(encoding="utf-8")
+            self.assertIn("artifact_type: machine_command_transcript", quality_text)
+            self.assertIn("returncode: 0", quality_text)
+
+    def test_validation_profile_overrides_python_unittest_assumption(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            tests_dir = repo / "tests"
+            tests_dir.mkdir()
+            (tests_dir / "test_fail.py").write_text("import unittest\n\nclass Fail(unittest.TestCase):\n    def test_fail(self):\n        self.fail('boom')\n", encoding="utf-8")
+            (repo / ".sdlc").mkdir()
+            write_json(repo / ".sdlc" / "validation-profile.json", {
+                "quality_commands": [["sh", "-c", "echo configured-quality"]],
+                "python_unittest_required": False,
+            })
+            self.assertEqual(detected_validation_commands(repo, quality_only=True), [["sh", "-c", "echo configured-quality"]])
+
+    def test_failed_quality_command_keeps_gate_no_go_with_transcript(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self.assertEqual(run_cmd(["git", "init", "-b", "feature"], repo)["returncode"], 0)
+            self.assertEqual(run_cmd(["git", "config", "user.email", "sdlc@example.test"], repo)["returncode"], 0)
+            self.assertEqual(run_cmd(["git", "config", "user.name", "SDLC Test"], repo)["returncode"], 0)
+            (repo / "README.md").write_text("fixture\n", encoding="utf-8")
+            self.assertEqual(run_cmd(["git", "add", "README.md"], repo)["returncode"], 0)
+            self.assertEqual(run_cmd(["git", "commit", "-m", "chore: fixture"], repo)["returncode"], 0)
+            run_id = "quality-fails"
+            self.assertEqual(main(["--repo", str(repo), "init"]), 0)
+            write_json(repo / ".sdlc" / "validation-profile.json", {
+                "quality_commands": [["sh", "-c", "echo fail; exit 7"]],
+                "python_unittest_required": False,
+            })
+            self.assertEqual(main(["--repo", str(repo), "plan", "Fail quality", "--run-id", run_id, "--ui", "no"]), 0)
+            self.assertEqual(main(["--repo", str(repo), "run", run_id]), 0)
+            store = RunStore(repo)
+            gate = next(item for item in store.load_plan(run_id).gates if item.id == "deterministic_quality")
+            self.assertEqual(gate.verdict, "NO_GO")
+            text = (store.run_dir(run_id) / "artifacts" / "gates" / "deterministic_quality" / "format_result.md").read_text(encoding="utf-8")
+            self.assertIn("command: sh -c 'echo fail; exit 7'", text)
+            self.assertIn("returncode: 7", text)
+
     def test_dry_run_git_context_no_go_without_git_repo(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -3372,8 +3440,12 @@ class WorkerCaptureTests(unittest.TestCase):
             progress = read_json(run_dir / "artifacts" / "prompt-run" / "progress.json")
             phases = [(item["phase"], item["status"]) for item in progress["phases"]]
             self.assertIn(("deliverable_validation", "GO"), phases)
+            self.assertIn(("gate_evidence_materialization", "GO"), phases)
             imported = next(item for item in progress["phases"] if item["phase"] == "prompt_import")
             self.assertEqual(imported["required_outputs"], ["docs/audits/review.md", "docs/audits/inventory.json"])
+            store = RunStore(repo)
+            intake = next(gate for gate in store.load_plan("prompt-run-fixture").gates if gate.id == "intake_scope")
+            self.assertTrue(any(path.endswith("intake_scope-evidence.json") for path in intake.evidence))
             self.assertTrue((run_dir / "final-report.md").exists())
 
     def test_prompt_run_restores_read_only_repo_mutation(self) -> None:
