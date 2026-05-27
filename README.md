@@ -107,6 +107,14 @@ python -m sdlc git provenance <run-id>
 python -m sdlc validate --run-id <run-id> --release
 ```
 
+Every completed run must now record branch housekeeping. If policy and human
+approval allow direct `main` integration, the run should merge or fast-forward
+the approved work into `main`, push `origin/main`, and delete only the SDLC
+branches/worktrees created for that run after recording their SHAs. If approval
+is missing, the final report must preserve the feature branch and include the
+exact merge, PR, and cleanup commands still required. Do not merge stale,
+failed, unrelated, or abandoned branches as part of housekeeping.
+
 By default, worker commands are **dry-run only**. Use `--execute` explicitly if you want the adapter to call Codex or Claude.
 The local `run` command now performs a full advisory pass: it creates
 architecture/dev/QA/red-team gate artifacts without external workers, runs

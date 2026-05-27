@@ -117,6 +117,15 @@ Default behavior:
 - Push feature branch and open PR.
 - Do not push `origin/main` unless explicitly authorized by policy and human approval.
 - Do not deploy unless production rollout is explicitly included and authorized.
+- End-of-run branch housekeeping is required:
+  - If policy and human approval permit direct `main` integration, merge or fast-forward
+    the approved run changes into `main`, push `origin/main`, and delete only the SDLC
+    branches/worktrees created for that run after recording their SHAs.
+  - If direct `main` integration is not approved, leave the feature branch intact, record
+    the exact merge command, PR/push status, cleanup commands, and approval still needed.
+  - Never merge unrelated, stale, failed, or abandoned branches just because they exist.
+  - Never discard uncommitted work without first recording an explicit stash, patch, or
+    operator-approved discard note in the final report.
 
 ## Final report format
 Include:
@@ -130,6 +139,7 @@ Include:
 - Unsupported claims removed
 - Rollback commands if deployment occurred
 - Monitoring/post-deploy validation if deployment occurred
+- Branch integration and cleanup status, including kept/deleted branch SHAs
 - Next audit triggers
 """
 

@@ -240,10 +240,20 @@ DEFAULT_GATES: list[GateDefinition] = [
     GateDefinition(
         id="commit_branch_pr_ci",
         order=23,
-        title="Commit, branch, PR, and CI gate",
+        title="Commit, branch, PR, CI, and branch housekeeping gate",
         owner="agent_1_pm_coordinator",
-        purpose="Commit safely, prefer feature branch + PR, run CI, and block direct main push by default.",
-        required_artifacts=["commit_message", "branch_name", "pr_or_push_plan", "ci_status"],
+        purpose=(
+            "Commit safely, prefer feature branch + PR, run CI, block direct main push by "
+            "default, and record the approved main-integration or cleanup path."
+        ),
+        required_artifacts=[
+            "commit_message",
+            "branch_name",
+            "pr_or_push_plan",
+            "ci_status",
+            "main_integration_status",
+            "branch_cleanup_status",
+        ],
         default_mode="PR",
         blocks_deploy=True,
     ),
