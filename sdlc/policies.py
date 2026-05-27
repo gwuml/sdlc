@@ -74,7 +74,7 @@ DEFAULT_POLICY: dict[str, Any] = {
         },
     },
     "agents": {
-        "max_parallel": 6,
+        "max_parallel": 12,
         "min_parallel_for_high_or_extreme": 6,
         "allowed_workers": ["codex", "openai-codex-primary", "openai-codex-adversary", "claude", "gemini", "kimi"],
         "role_worker_preferences": {},

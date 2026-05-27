@@ -9,7 +9,7 @@
       "gemini",
       "kimi"
     ],
-    "max_parallel": 6,
+    "max_parallel": 12,
     "min_parallel_for_high_or_extreme": 6,
     "role_worker_preferences": {}
   },

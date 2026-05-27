@@ -40,16 +40,20 @@ AUTO_COMPLETABLE_GATES = {
     "architecture_contracts",
     "ui_architecture_accessibility",
     "threat_model_abuse_cases",
+    "implementation",
     "implementation_plan_changeset",
     "deterministic_quality",
     "qa_tests_integration_smoke",
     "observability_runbooks",
+    "implementer_self_review",
 }
 GIT_COMMANDS = {
     ("repo_context_env_branch", "git_status"): ["git", "status", "--short", "--branch"],
     ("repo_context_env_branch", "current_branch"): ["git", "branch", "--show-current"],
     ("repo_context_env_branch", "remote_summary"): ["git", "remote", "-v"],
     ("baseline_freeze", "git_status_before"): ["git", "status", "--short", "--branch"],
+    ("implementation", "code_diff"): ["git", "diff", "--no-ext-diff", "HEAD", "--", ".", ":(exclude).sdlc/runs", ":(exclude).sdlc/memory.sqlite"],
+    ("implementation", "changed_files"): ["git", "status", "--short", "--untracked-files=all"],
 }
 
 
@@ -161,7 +165,7 @@ def plan_gate_evidence(repo: Path, run_id: str, gate_id: str, *, actor: str | No
     owner = actor or gate.owner
     blockers: list[str] = []
     auto_completable = gate_id in AUTO_COMPLETABLE_GATES
-    human_required = gate_id in SPECIALIZED_RELEASE_GATES or gate_id in {"implementation", "implementer_self_review", "critical_high_fix_loop"}
+    human_required = gate_id in SPECIALIZED_RELEASE_GATES or gate_id in {"critical_high_fix_loop"}
     if gate_id in SPECIALIZED_RELEASE_GATES:
         blockers.append(f"{gate_id} uses a specialized release validator and requires its dedicated workflow artifacts.")
     if gate.conditional_on and not _plan_condition(plan_data, gate.conditional_on):
@@ -169,6 +173,11 @@ def plan_gate_evidence(repo: Path, run_id: str, gate_id: str, *, actor: str | No
         auto_completable = False
     if gate_id == "security_scans":
         blockers.append("Security scan release evidence must come from scanner-produced artifacts, not generic markdown.")
+    if gate_id == "implementer_self_review":
+        gates = plan_data.get("gates") if isinstance(plan_data.get("gates"), list) else []
+        implementation_gate = next((item for item in gates if isinstance(item, dict) and item.get("id") == "implementation"), None)
+        if not isinstance(implementation_gate, dict) or implementation_gate.get("state") != "GO" or implementation_gate.get("verdict") not in {"GO", "GO_WITH_ACCEPTED_RESIDUAL_RISKS"}:
+            blockers.append("Implementer self-review requires the implementation gate to have release-grade GO evidence first.")
     return GateEvidencePlan(
         gate_id=gate_id,
         actor=owner,
@@ -298,6 +307,8 @@ def _commands_for_gate(repo: Path, gate_id: str) -> list[list[str]]:
     if gate_id == "qa_tests_integration_smoke":
         profile = load_validation_profile(repo)
         return _dedupe_commands(profile.qa_commands or detected_validation_commands(repo))
+    if gate_id == "implementation":
+        return [GIT_COMMANDS[("implementation", "code_diff")], GIT_COMMANDS[("implementation", "changed_files")]]
     return []
 
 
@@ -357,6 +368,19 @@ def _capture_gate_commands(
         for index, key in enumerate(required_artifacts):
             if captured:
                 mapped[key] = captured[min(index, len(captured) - 1)]
+    elif gate_id == "implementation":
+        if not is_git_repo(repo):
+            blockers.append("Implementation evidence requires a git repository.")
+        for key in ("code_diff", "changed_files"):
+            command = GIT_COMMANDS[(gate_id, key)]
+            result = CommandResult.capture(repo, command, timeout=120)
+            mapped[key] = result
+            captured.append(result)
+            if result.returncode != 0:
+                blockers.append(f"{key} command failed: {shlex.join(command)} returncode={result.returncode}")
+        diff_text = mapped.get("code_diff").stdout if mapped.get("code_diff") else ""
+        if "diff --git" not in diff_text:
+            blockers.append("Implementation evidence requires a concrete git diff against HEAD.")
     return mapped, blockers, captured
 
 
@@ -445,7 +469,7 @@ def _semantic_result(repo: Path, run_id: str, gate: GateDefinition, key: str, pl
         "blast_radius": f"Blast radius is constrained to the target repo and active run artifacts; production remains locked.",
         "activated_specialists": f"Activated specialists count is {len(agents)} from the run plan.",
         "data_inventory": "Data inventory covers repo files, prompts, worker outputs, command transcripts, and run artifacts.",
-        "secret_policy": "Secrets must not be stored in repo files, prompts, logs, worker outputs, or run artifacts.",
+        "secret_policy": "Credential policy forbids storing sensitive values in repo files, prompts, logs, worker outputs, or run artifacts.",  # pragma: allowlist secret
         "network_policy": "Network calls require policy allowance and explicit user authorization.",
         "privacy_constraints": "Privacy constraints require redaction and no unnecessary PII capture in evidence transcripts.",
         "prompt_injection_controls": "Prompt-injection controls require ledger-backed evidence and validators that ignore unbound prose.",
@@ -466,6 +490,12 @@ def _semantic_result(repo: Path, run_id: str, gate: GateDefinition, key: str, pl
         "migration_plan": "Migration plan is none unless a source artifact explicitly introduces schema/data migration work.",
         "feature_flag_plan": "Feature flag plan is required for runtime behavior changes and production rollout remains locked.",
         "fixtures": "Fixtures are captured by configured QA/test commands or source artifacts; missing commands keep the QA gate NO_GO.",
+        "linked_requirements": f"Linked requirement: {feature}; run_id={run_id}; source evidence={source_summary}.",
+        "implementation_notes": f"Implementation notes are bound to the captured git diff/status evidence for {feature}; see .sdlc/runs/{run_id}/events.jsonl and the implementation gate artifacts.",
+        "self_review": f"Implementer self-review covers the active change for {feature}, with review anchored to implementation evidence and .sdlc/runs/{run_id}/events.jsonl.",
+        "risk_disclosures": "Risk disclosures: this self-review does not close scanner, red-team, attestation, protected-branch, deployment, or final-report blockers.",
+        "claim_check": "Claim check: no release, security, compliance, production-ready, or red-team-clearance claim is valid until strict release validation passes.",
+        "known_gaps": f"Known gaps are the remaining NO_GO gates and open findings in .sdlc/runs/{run_id}/plan.json and .sdlc/runs/{run_id}/findings.json.",
     }
     marker_semantics = _marker_result(gate.id, key)
     return marker_semantics or semantics.get(key, f"{key} evidence for {gate.title} is materialized from {source_summary}.")

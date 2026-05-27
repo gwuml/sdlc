@@ -841,6 +841,41 @@ Optional:
             self.assertEqual(len(first_six), 6)
             self.assertTrue(all(task["status"] == "completed" for task in task_plan["tasks"][:6]))
 
+    def test_agents_plan_supports_twelve_roles_when_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            run_id = "agents-twelve"
+            self.assertEqual(
+                main([
+                    "--repo",
+                    str(repo),
+                    "start",
+                    "Extreme UI security migration requiring 12 role agents",
+                    "--run-id",
+                    run_id,
+                    "--risk",
+                    "extreme",
+                    "--ui",
+                    "yes",
+                    "--security",
+                    "yes",
+                    "--parallel",
+                    "12",
+                ]),
+                0,
+            )
+            self.assertEqual(main(["--repo", str(repo), "agents", "plan", run_id, "--parallel", "12", "--json"]), 0)
+            task_plan = read_json(repo / ".sdlc" / "runs" / run_id / "artifacts" / "agents" / "task-plan.json")
+            self.assertEqual(task_plan["requested_parallelism"], 12)
+            self.assertEqual(task_plan["effective_parallelism"], 12)
+            self.assertEqual(len(task_plan["batches"][0]["task_ids"]), 12)
+            agent_ids = {task["agent_id"] for task in task_plan["tasks"]}
+            self.assertEqual(len(agent_ids), 12)
+            self.assertIn("agent_12_domain_specialist", agent_ids)
+            self.assertTrue(
+                any(task["agent_id"] == "agent_8_cybersecurity_engineer" and task["mode"] == "SECURITY_REVIEW" for task in task_plan["tasks"])
+            )
+
     def test_agents_execute_invokes_workers_only_with_execute(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -1911,6 +1946,42 @@ Optional:
             quality_text = (store.run_dir(run_id) / "artifacts" / "gates" / "deterministic_quality" / "format_result.md").read_text(encoding="utf-8")
             self.assertIn("artifact_type: machine_command_transcript", quality_text)
             self.assertIn("returncode: 0", quality_text)
+
+    def test_command_run_materializes_implementation_diff_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            self.assertEqual(run_cmd(["git", "init", "-b", "feature"], repo)["returncode"], 0)
+            self.assertEqual(run_cmd(["git", "config", "user.email", "sdlc@example.test"], repo)["returncode"], 0)
+            self.assertEqual(run_cmd(["git", "config", "user.name", "SDLC Test"], repo)["returncode"], 0)
+            readme = repo / "README.md"
+            readme.write_text("fixture\n", encoding="utf-8")
+            self.assertEqual(run_cmd(["git", "add", "README.md"], repo)["returncode"], 0)
+            self.assertEqual(run_cmd(["git", "commit", "-m", "chore: fixture"], repo)["returncode"], 0)
+            readme.write_text("fixture\nimplementation change\n", encoding="utf-8")
+            run_id = "implementation-materialized"
+            self.assertEqual(main(["--repo", str(repo), "init"]), 0)
+            write_json(repo / ".sdlc" / "validation-profile.json", {
+                "quality_commands": [["sh", "-c", "echo quality-ok"]],
+                "qa_commands": [["sh", "-c", "echo qa-ok"]],
+                "python_unittest_required": False,
+            })
+            self.assertEqual(main(["--repo", str(repo), "plan", "Materialize implementation evidence", "--run-id", run_id, "--ui", "no"]), 0)
+            self.assertEqual(main(["--repo", str(repo), "run", run_id]), 0)
+            store = RunStore(repo)
+            plan = store.load_plan(run_id)
+            gate = next(item for item in plan.gates if item.id == "implementation")
+            evidence = [path for path in gate.evidence if path.endswith("implementation-evidence.json")]
+            self.assertTrue(evidence)
+            self.assertIsNone(_validate_release_gate_evidence(repo, store.run_dir(run_id), gate, "GO", evidence))
+            diff_text = (store.run_dir(run_id) / "artifacts" / "gates" / "implementation" / "code_diff.md").read_text(encoding="utf-8")
+            self.assertIn("diff --git", diff_text)
+            self.assertIn("README.md", diff_text)
+            self_review_gate = next(item for item in plan.gates if item.id == "implementer_self_review")
+            self_review_evidence = [path for path in self_review_gate.evidence if path.endswith("implementer_self_review-evidence.json")]
+            self.assertTrue(self_review_evidence)
+            self.assertIsNone(_validate_release_gate_evidence(repo, store.run_dir(run_id), self_review_gate, "GO", self_review_evidence))
+            events = [json.loads(line) for line in (store.run_dir(run_id) / "events.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+            self.assertTrue(any(event.get("event") == "gate.completed" and event.get("gate") == "implementer_self_review" and event.get("materialized") is True for event in events))
 
     def test_validation_profile_overrides_python_unittest_assumption(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

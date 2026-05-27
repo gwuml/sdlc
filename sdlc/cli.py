@@ -3038,6 +3038,8 @@ def _materialize_release_gate_evidence(repo: Path, store: RunStore, run_id: str)
             if evidence_path not in current.evidence:
                 current.evidence.append(evidence_path)
             current.notes = "Release-grade typed evidence materialized by the SDLC control plane."
+            if not _has_gate_completion_event(_load_run_events(store.run_dir(run_id)), gate.id):
+                ledger.event("gate.completed", gate=gate.id, verdict="GO", evidence=[evidence_path], materialized=True)
             ledger.event("gate.evidence_materialized", gate=gate.id, verdict="GO", evidence=evidence_path, artifact_keys=sorted(result.artifact_paths))
         else:
             if gate.id in {"deterministic_quality", "qa_tests_integration_smoke"}:
@@ -3053,6 +3055,7 @@ def _materialize_release_gate_evidence(repo: Path, store: RunStore, run_id: str)
             "evidence": evidence_path,
             "blockers": blockers,
         })
+        store.save_plan(plan)
     store.save_plan(plan)
     return statuses
 
@@ -5254,7 +5257,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_agents = sub.add_parser("agents", help="Plan, execute, inspect, and diagnose role-agent work")
     agents_sub = p_agents.add_subparsers(dest="agents_command", required=True)
-    ag_plan = agents_sub.add_parser("plan", help="Create a six-agent task plan")
+    ag_plan = agents_sub.add_parser("plan", help="Create a role-agent task plan")
     ag_plan.add_argument("run_id")
     ag_plan.add_argument("--parallel", type=int, default=6)
     ag_plan.add_argument("--json", action="store_true")

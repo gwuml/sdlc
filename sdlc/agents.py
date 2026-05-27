@@ -1,4 +1,4 @@
-"""Six-role agent planning and dry-run-safe scheduling."""
+"""Role-agent planning and dry-run-safe scheduling."""
 
 from __future__ import annotations
 
@@ -14,11 +14,15 @@ from typing import Any
 from .adapters import adapter_from_policy, capture_worker_result, worker_diagnostics
 from .ledger import Ledger
 from .models import RunPlan
-from .pipeline import DEFAULT_AGENTS
+from .pipeline import CONDITIONAL_AGENTS, DEFAULT_AGENTS
 from .util import now_iso, read_json
 
 
 AGENT_PLAN_PATH = "artifacts/agents/task-plan.json"
+DEFAULT_AGENT_READ_PATHS = ["sdlc/**", "docs/**", "tests/**"]
+DEFAULT_AGENT_DENY_PATHS = [".env*", "secrets/**", "infra/prod/**", ".sdlc/runs/**", ".sdlc/memory.sqlite"]
+WORKSPACE_SCRATCH_DIRS = {".sdlc-redteam-tmp", ".sdlc-worker-tmp"}
+WORKSPACE_GENERATED_DIRS = {"target", "node_modules", ".next", ".turbo", "dist"}
 
 ROLE_DEFAULTS: dict[str, dict[str, Any]] = {
     "agent_1_pm_coordinator": {"worker": "codex", "mode": "PLAN", "write_paths": []},
@@ -27,6 +31,12 @@ ROLE_DEFAULTS: dict[str, dict[str, Any]] = {
     "agent_4_evidence_reporting_owner": {"worker": "codex", "mode": "PLAN", "write_paths": [".sdlc/templates/**", ".sdlc/schemas/**", ".sdlc/policies/**"]},
     "agent_5_qa_validation_owner": {"worker": "codex", "mode": "TEST", "write_paths": ["tests/**"]},
     "agent_6_redteam_deploy_rollback": {"worker": "openai-codex-adversary", "mode": "SECURITY_REVIEW", "write_paths": []},
+    "agent_7_ui_architect": {"worker": "codex", "mode": "PLAN", "write_paths": ["docs/agents/agent_7_ui_architect/**"]},
+    "agent_8_cybersecurity_engineer": {"worker": "openai-codex-adversary", "mode": "SECURITY_REVIEW", "write_paths": []},
+    "agent_9_sre_sysadmin": {"worker": "codex", "mode": "PLAN", "write_paths": ["docs/agents/agent_9_sre_sysadmin/**"]},
+    "agent_10_it_enterprise_integration": {"worker": "codex", "mode": "PLAN", "write_paths": ["docs/agents/agent_10_it_enterprise_integration/**"]},
+    "agent_11_compliance_audit": {"worker": "codex", "mode": "PLAN", "write_paths": ["docs/agents/agent_11_compliance_audit/**"]},
+    "agent_12_domain_specialist": {"worker": "codex", "mode": "PLAN", "write_paths": ["docs/agents/agent_12_domain_specialist/**"]},
 }
 
 
@@ -40,7 +50,7 @@ def plan_agents(plan: RunPlan, policy: dict[str, Any], *, requested_parallelism:
         effective_parallelism = max(effective_parallelism, int(agent_policy.get("min_parallel_for_high_or_extreme", 6) or 6))
     effective_parallelism = max(1, min(effective_parallelism, max_parallel if max_parallel >= 1 else 6))
 
-    roster = _baseline_roster(plan)
+    roster = _baseline_roster(plan, include_all_conditionals=requested_parallelism >= 12)
     tasks = [_task_for_agent(plan, policy, agent) for agent in roster]
     batches = _build_batches(tasks, effective_parallelism)
     return {
@@ -147,13 +157,17 @@ def agents_doctor(policy: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _baseline_roster(plan: RunPlan) -> list[dict[str, str]]:
+def _baseline_roster(plan: RunPlan, *, include_all_conditionals: bool = False) -> list[dict[str, str]]:
     by_id = {agent["id"]: agent for agent in plan.agents}
     for agent in DEFAULT_AGENTS:
         by_id.setdefault(agent["id"], agent)
+    if include_all_conditionals:
+        for agent in CONDITIONAL_AGENTS:
+            by_id.setdefault(agent["id"], agent)
     ordered = []
     seen = set()
-    for agent in DEFAULT_AGENTS + plan.agents:
+    candidates = DEFAULT_AGENTS + plan.agents + (CONDITIONAL_AGENTS if include_all_conditionals else [])
+    for agent in candidates:
         if agent["id"] not in seen:
             ordered.append(by_id[agent["id"]])
             seen.add(agent["id"])
@@ -166,6 +180,9 @@ def _task_for_agent(plan: RunPlan, policy: dict[str, Any], agent: dict[str, str]
     worker = _preferred_worker(agent_id, defaults["worker"], policy)
     mode = defaults["mode"]
     available = _worker_available(worker, policy)
+    read_paths = _agent_read_paths(agent_id, policy)
+    write_paths = _agent_write_paths(agent_id, policy, defaults)
+    deny_paths = _agent_deny_paths(policy)
     return {
         "task_id": f"task-{agent_id}",
         "agent_id": agent_id,
@@ -175,14 +192,58 @@ def _task_for_agent(plan: RunPlan, policy: dict[str, Any], agent: dict[str, str]
         "mode": mode,
         "status": "queued",
         "depends_on": [],
-        "read_paths": ["sdlc/**", "docs/**", "tests/**"],
-        "write_paths": defaults.get("write_paths", []),
-        "deny_paths": [".env*", "secrets/**", "infra/prod/**", ".sdlc/runs/**", ".sdlc/memory.sqlite"],
+        "read_paths": read_paths,
+        "write_paths": write_paths,
+        "deny_paths": deny_paths,
         "artifacts": {
             "task": f"artifacts/agents/{agent_id}/task.json",
             "summary": f"artifacts/agents/{agent_id}/summary.md",
         },
     }
+
+
+def _agent_read_paths(agent_id: str, policy: dict[str, Any]) -> list[str]:
+    if agent_id == "agent_3_implementation_owner":
+        return _unique_paths([*DEFAULT_AGENT_READ_PATHS, *_implementer_allow_paths(policy)])
+    return list(DEFAULT_AGENT_READ_PATHS)
+
+
+def _agent_write_paths(agent_id: str, policy: dict[str, Any], defaults: dict[str, Any]) -> list[str]:
+    if agent_id == "agent_3_implementation_owner":
+        allow_paths = _implementer_allow_paths(policy)
+        if allow_paths:
+            return allow_paths
+    return list(defaults.get("write_paths", []))
+
+
+def _agent_deny_paths(policy: dict[str, Any]) -> list[str]:
+    implementer = _implementer_permissions(policy)
+    deny_paths = implementer.get("deny_paths", []) if isinstance(implementer, dict) else []
+    if deny_paths:
+        return list(deny_paths)
+    return list(DEFAULT_AGENT_DENY_PATHS)
+
+
+def _implementer_allow_paths(policy: dict[str, Any]) -> list[str]:
+    implementer = _implementer_permissions(policy)
+    allow_paths = implementer.get("allow_paths", []) if isinstance(implementer, dict) else []
+    return list(allow_paths) if isinstance(allow_paths, list) else []
+
+
+def _implementer_permissions(policy: dict[str, Any]) -> dict[str, Any]:
+    permissions = policy.get("permissions", {}) if isinstance(policy.get("permissions"), dict) else {}
+    implementer = permissions.get("implementer", {}) if isinstance(permissions.get("implementer"), dict) else {}
+    return implementer
+
+
+def _unique_paths(paths: list[str]) -> list[str]:
+    unique: list[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        if path not in seen:
+            unique.append(path)
+            seen.add(path)
+    return unique
 
 
 def _preferred_worker(agent_id: str, default: str, policy: dict[str, Any]) -> str:
@@ -318,6 +379,7 @@ def _write_task_prompt(ledger: Ledger, run_dir: Path, plan: RunPlan, task: dict[
         "",
         "Return concise JSON or Markdown evidence. Do not include secrets.",
         "Do not claim production readiness, security, compliance, profitability, or world-class maturity without gate evidence.",
+        "Keep evidence reads bounded: do not cat full CSVs, large JSON files, logs, or generated trade/equity dumps. Use rg, wc, head, tail, and small sed ranges for targeted evidence.",
         "",
     ])
     rel = f"artifacts/agents/{task['agent_id']}/prompt.md"
@@ -351,6 +413,7 @@ def _create_agent_workspace(repo: Path, agent_id: str) -> tuple[tempfile.Tempora
         ignore=_ignore_agent_workspace_paths,
     )
     (destination / ".sdlc-redteam-tmp").mkdir(parents=True, exist_ok=True)
+    (destination / ".sdlc-worker-tmp").mkdir(parents=True, exist_ok=True)
     return temp_dir, destination
 
 
@@ -366,12 +429,14 @@ def _ignore_agent_workspace_paths(src: str, names: list[str]) -> set[str]:
     )(src, names))
     if Path(src).name == ".sdlc":
         ignored.update(name for name in names if name in {"runs", "memory.sqlite"})
+    ignored.update(name for name in names if name in WORKSPACE_SCRATCH_DIRS)
+    ignored.update(name for name in names if name in WORKSPACE_GENERATED_DIRS)
     return ignored
 
 
 def _workspace_snapshot(root: Path) -> dict[str, str]:
     snapshot: dict[str, str] = {}
-    excluded = {".git", ".venv", "venv", "__pycache__", ".sdlc-redteam-tmp"}
+    excluded = {".git", ".venv", "venv", "__pycache__", *WORKSPACE_SCRATCH_DIRS, *WORKSPACE_GENERATED_DIRS}
     for path in root.rglob("*"):
         if not path.is_file():
             continue

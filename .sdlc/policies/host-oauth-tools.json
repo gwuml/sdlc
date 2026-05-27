@@ -16,14 +16,14 @@
   "claim_discipline": "STRICT",
   "deploy_default": "LOCKED",
   "direct_main_push_allowed": false,
-  "name": "high-risk",
-  "network_allowed": false,
+  "name": "host-oauth-tools",
+  "network_allowed": true,
   "permissions": {
     "implementer": {
       "allow_paths": [
-        "sdlc/**",
-        "tests/**",
         "docs/**",
+        "tests/**",
+        ".codex/prompts/**",
         ".sdlc/templates/**",
         ".sdlc/schemas/**",
         ".sdlc/policies/**"
@@ -65,7 +65,7 @@
     ],
     "audit_isolation": {
       "auth": {
-        "mode": "absent"
+        "mode": "brokered"
       },
       "auth_env": [],
       "container_engine": "auto",
