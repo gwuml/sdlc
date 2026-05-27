@@ -1009,7 +1009,10 @@ def execute_redteam_workers(
                 )
                 record_hard_isolation_rejected(worker, round_number, adapter, preflight)
                 return None
-            setattr(adapter, "_sdlc_audit_isolation_config", preflight.adapter_config)
+            if preflight.adapter_config.get("kind") == "macos_sandbox_exec":
+                setattr(adapter, "_sdlc_hard_audit_isolation_method", "macos_sandbox_exec")
+            else:
+                setattr(adapter, "_sdlc_audit_isolation_config", preflight.adapter_config)
         return adapter
 
     def record_total_timeout_skip(worker: str, round_number: int) -> None:
@@ -1813,7 +1816,9 @@ def _worker_attested_review(output: str, run_id: str, prompt_sha256: str) -> boo
 
 
 def _create_audit_workspace(repo: Path) -> tuple[tempfile.TemporaryDirectory, Path]:
-    temp_dir = tempfile.TemporaryDirectory(prefix="sdlc-redteam-")
+    workspace_root = repo.resolve(strict=False).parent / ".sdlc-audit-workspaces"
+    workspace_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temp_dir = tempfile.TemporaryDirectory(prefix="sdlc-redteam-", dir=str(workspace_root))
     destination = Path(temp_dir.name) / repo.name
     shutil.copytree(
         repo,

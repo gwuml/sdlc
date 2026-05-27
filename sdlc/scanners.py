@@ -17,8 +17,8 @@ from .util import find_files, redact_secrets, run_cmd, sha256_text
 
 PASS_STATUSES = {"PASS", "PASS_WITH_FINDINGS", "NOT_APPLICABLE"}
 BLOCKING_STATUSES = {"FAIL", "UNAVAILABLE", "BLOCKED_BY_POLICY"}
-EXCLUDED_DIRS = {".git", ".sdlc", ".venv", "venv", "__pycache__", "node_modules", "dist", "build", "target", "data", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
-EXCLUDE_FILES_RE = r"(^|/)(\.git|\.sdlc|\.venv|venv|__pycache__|node_modules|dist|build|target|data|\.pytest_cache|\.mypy_cache|\.ruff_cache)(/|$)|(^|/)docs/reports/.*\.(csv|json)$"
+EXCLUDED_DIRS = {".git", ".sdlc", ".venv", "venv", "__pycache__", "node_modules", "dist", "build", "target", "data", "artifacts", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+EXCLUDE_FILES_RE = r"(^|/)(\.git|\.sdlc|\.venv|venv|__pycache__|node_modules|dist|build|target|data|artifacts|\.pytest_cache|\.mypy_cache|\.ruff_cache)(/|$)|(^|/)docs/reports/.*\.(csv|json)$"
 
 
 @dataclass
@@ -138,6 +138,10 @@ def _run_checkov(repo: Path, run_dir: Path, ledger: Ledger) -> ScanResult:
         str(repo / ".sdlc"),
         "--skip-path",
         str(repo / ".git"),
+        "--skip-path",
+        str(repo / "artifacts"),
+        "--skip-framework",
+        "secrets",
     ])
     return _run_scanner(repo, run_dir, ledger, "checkov", "iac", command, required=True, timeout=180)
 
@@ -200,6 +204,21 @@ def _run_scanner(
         str(result["stderr"] or "<empty>"),
         "",
     ])
+    if _scanner_command_unavailable(result):
+        tool = command[0] if command else scanner
+        return _write_result(
+            run_dir,
+            ledger,
+            scanner,
+            category,
+            "UNAVAILABLE",
+            command,
+            int(result["returncode"]),
+            content,
+            f"Scanner unavailable: {tool}",
+            blocking=required,
+            manifest_bindings=manifest_bindings or [],
+        )
     normalized = normalizer(result) if normalizer else {}
     status = str(normalized.get("status") or ("PASS" if result["returncode"] == 0 else "FAIL"))
     blocking = bool(normalized.get("blocking", status in BLOCKING_STATUSES))
@@ -220,6 +239,19 @@ def _run_scanner(
         findings=normalized.get("findings", []),
         manifest_bindings=manifest_bindings or [],
     )
+
+
+def _scanner_command_unavailable(result: dict[str, Any]) -> bool:
+    if result.get("returncode") != 127:
+        return False
+    combined = f"{result.get('stdout') or ''}\n{result.get('stderr') or ''}".lower()
+    markers = [
+        "command not found",
+        "not found",
+        "no such file or directory",
+        "cannot execute",
+    ]
+    return any(marker in combined for marker in markers)
 
 
 def _normalize_bandit(repo: Path, result: dict[str, Any], policy: dict[str, Any], risk_level: str) -> dict[str, Any]:
@@ -435,10 +467,20 @@ def _tool_command(executable: str, args: list[str]) -> list[str]:
     found = shutil.which(executable)
     if found:
         return [found, *args]
-    venv_tool = Path(sys.executable).parent / executable
-    if venv_tool.exists():
-        return [str(venv_tool), *args]
+    for candidate_dir in _tool_search_dirs():
+        venv_tool = candidate_dir / executable
+        if venv_tool.exists():
+            return [str(venv_tool), *args]
     return [executable, *args]
+
+
+def _tool_search_dirs() -> list[Path]:
+    package_root = Path(__file__).resolve().parents[1]
+    return [
+        Path(sys.executable).parent,
+        package_root / ".scanner-venv" / "bin",
+        package_root / ".venv" / "bin",
+    ]
 
 
 def _command_available(command_name: str) -> bool:

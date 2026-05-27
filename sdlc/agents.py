@@ -9,7 +9,7 @@ import shutil
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .adapters import adapter_from_policy, capture_worker_result, worker_diagnostics
 from .ledger import Ledger
@@ -29,7 +29,18 @@ ROLE_DEFAULTS: dict[str, dict[str, Any]] = {
     "agent_2_architecture_contracts": {"worker": "claude", "mode": "PLAN", "write_paths": []},
     "agent_3_implementation_owner": {"worker": "codex", "mode": "BUILD", "write_paths": ["sdlc/**", "docs/**"]},
     "agent_4_evidence_reporting_owner": {"worker": "codex", "mode": "PLAN", "write_paths": [".sdlc/templates/**", ".sdlc/schemas/**", ".sdlc/policies/**"]},
-    "agent_5_qa_validation_owner": {"worker": "codex", "mode": "TEST", "write_paths": ["tests/**"]},
+    "agent_5_qa_validation_owner": {
+        "worker": "codex",
+        "mode": "TEST",
+        "write_paths": [
+            "tests/**",
+            "artifacts/test-results/**",
+            "artifacts/screenshots/**",
+            "artifacts/screencasts/**",
+            "dist-mcp/**",
+            "docs/reports/**",
+        ],
+    },
     "agent_6_redteam_deploy_rollback": {"worker": "openai-codex-adversary", "mode": "SECURITY_REVIEW", "write_paths": []},
     "agent_7_ui_architect": {"worker": "codex", "mode": "PLAN", "write_paths": ["docs/agents/agent_7_ui_architect/**"]},
     "agent_8_cybersecurity_engineer": {"worker": "openai-codex-adversary", "mode": "SECURITY_REVIEW", "write_paths": []},
@@ -85,6 +96,7 @@ def execute_agent_plan(
     execute: bool,
     parallel: int | None = None,
     timeout: int = 120,
+    progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     ledger = Ledger(run_dir, plan.run_id)
     payload = load_agent_plan(run_dir)
@@ -94,6 +106,7 @@ def execute_agent_plan(
     tasks = [dict(task) for task in payload.get("tasks", [])]
     started_at = now_iso()
     ledger.event("agents.execution_started", execute_requested=execute, parallelism=effective_parallelism)
+    _emit_progress(progress, {"event": "agents.execution_started", "execute_requested": execute, "parallelism": effective_parallelism})
     completed: list[dict[str, Any]] = []
     dependency_blocked: list[dict[str, Any]] = []
     completed_ids: set[str] = set()
@@ -107,10 +120,29 @@ def execute_agent_plan(
             continue
         runnable.append(task)
     with ThreadPoolExecutor(max_workers=max(1, effective_parallelism)) as executor:
-        futures = [executor.submit(_execute_task, run_dir, plan, policy, task, execute, timeout) for task in runnable]
+        futures = []
+        for task in runnable:
+            _emit_progress(progress, {
+                "event": "agents.task_started",
+                "agent_id": task.get("agent_id"),
+                "task_id": task.get("task_id"),
+                "worker": task.get("worker_family"),
+                "mode": task.get("mode"),
+                "execute_requested": execute,
+            })
+            futures.append(executor.submit(_execute_task, run_dir, plan, policy, task, execute, timeout))
         for future in as_completed(futures):
             result = future.result()
             completed.append(result)
+            _emit_progress(progress, {
+                "event": "agents.task_completed" if result.get("status") == "completed" else "agents.task_failed",
+                "agent_id": result.get("agent_id"),
+                "task_id": result.get("task_id"),
+                "worker": result.get("worker_family"),
+                "status": result.get("status"),
+                "returncode": result.get("returncode"),
+                "blocked_reason": result.get("blocked_reason"),
+            })
             if result.get("status") == "completed":
                 completed_ids.add(str(result.get("task_id")))
     for task in dependency_blocked:
@@ -129,7 +161,14 @@ def execute_agent_plan(
     }
     artifact = ledger.artifact(AGENT_PLAN_PATH, json.dumps(payload, indent=2, sort_keys=True) + "\n", event="agents.parallel_batch_completed", redact=False, execute_requested=execute, completed=len(completed))
     payload["artifact"] = artifact
+    _emit_progress(progress, {"event": "agents.execution_completed", "execute_requested": execute, "completed": len(completed), "blocked": len(dependency_blocked)})
     return payload
+
+
+def _emit_progress(progress: Callable[[dict[str, Any]], None] | None, event: dict[str, Any]) -> None:
+    if progress is None:
+        return
+    progress(event)
 
 
 def agent_status(run_dir: Path, plan: RunPlan, policy: dict[str, Any]) -> dict[str, Any]:

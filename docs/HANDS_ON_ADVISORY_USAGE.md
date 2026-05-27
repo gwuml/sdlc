@@ -14,6 +14,16 @@ python -m sdlc report hands-on-advisory --print
 
 Use `status` and `next` to decide the next hands-on task. The orchestrator should show `Authority mode: ADVISORY` until blockers are gone. Even then, production authority remains disabled unless a human release owner explicitly approves deployment and records rollback evidence.
 
+Before any HIGH/EXTREME executed prompt run or release-candidate push, run:
+
+```bash
+python -m sdlc release doctor <run-id> --json
+```
+
+The doctor fails fast on prerequisites that otherwise appear late: a dirty
+worktree, protected branch, missing signing keys, scanner policy/network
+mismatch, and missing local red-team sandbox/OAuth prerequisites.
+
 `sdlc run` performs a full no-worker advisory pass. It creates architecture,
 implementation, QA, and red-team gate artifacts even when Codex/Claude workers
 are not executed. Gates with real local evidence can become `GO`; gates that
@@ -35,7 +45,7 @@ Do not hide missing tools, scanner failures, failed tests, unavailable workers, 
 
 ## External Red-Team Workers
 
-For high-stakes runs, external model workers are blocked unless a qualifying container/VM audit runtime is available. The hard-isolation contract requires a read-only source mount, a live source-write probe, isolated `HOME`, ephemeral writable temp/cache paths, no host credential directory mounts, explicit policy-bound network mode, brokered/scoped/absent auth, process containment, cleanup evidence, and a ledger-backed attestation artifact.
+For high-stakes runs, external model workers are blocked unless a qualifying hard audit runtime is available. The default path is local macOS `sandbox-exec` with host Codex/OpenAI OAuth copied only into an ephemeral sandbox home. The contract requires a source-write probe, isolated `HOME`, ephemeral writable temp/cache paths, no host credential directory mounts, explicit policy-bound network mode, scoped/host OAuth auth, process containment, cleanup evidence, and a ledger-backed attestation artifact.
 
 Configure the runtime in `.sdlc/policies/<profile>.json`:
 
@@ -43,12 +53,10 @@ Configure the runtime in `.sdlc/policies/<profile>.json`:
 {
   "redteam": {
     "audit_isolation": {
-      "runtime": "container",
-      "container_engine": "auto",
-      "container_image": "your-audit-worker-image@sha256:<digest>",
-      "network_mode": "none",
-      "auth": {"mode": "brokered"},
-      "auth_env": ["SDLC_AUDIT_BROKER_URL"]
+      "runtime": "macos_sandbox_exec",
+      "network_mode": "host",
+      "auth": {"mode": "host_oauth"},
+      "auth_env": []
     }
   }
 }
@@ -60,7 +68,7 @@ Run the non-interactive preflight before executed external red-team work:
 python -m sdlc isolation preflight <run-id> --workers openai-codex-primary,openai-codex-adversary --json
 ```
 
-On macOS, `sandbox-exec` may still be used as advisory source-write protection, but it is not counted as hard audit isolation unless strict host-read and credential containment can be attested. An environment flag alone is not accepted. If container/VM hard isolation is unavailable, use the product for advisory workflow and keep the red-team gate `NO_GO`. Prompt compliance alone is not a security boundary.
+This local mode does not require Docker. If `sandbox-exec` or host OAuth is unavailable, the red-team worker is rejected instead of falling back to an unisolated host run. Prompt compliance alone is not a security boundary.
 
 ## Safe Iteration Loop
 

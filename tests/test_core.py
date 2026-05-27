@@ -930,6 +930,21 @@ Optional:
             self.assertTrue(blocked)
             self.assertTrue(all(task["status"] == "blocked_by_permissions" for task in blocked))
 
+    def test_qa_agent_can_write_validation_artifacts_without_broad_repo_access(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            run_id = "qa-artifact-ownership"
+            self.assertEqual(main(["--repo", str(repo), "start", "Validate UI and build artifacts", "--run-id", run_id, "--ui", "yes"]), 0)
+            self.assertEqual(main(["--repo", str(repo), "agents", "plan", run_id, "--parallel", "12"]), 0)
+            task_plan = read_json(repo / ".sdlc" / "runs" / run_id / "artifacts" / "agents" / "task-plan.json")
+            qa_task = next(task for task in task_plan["tasks"] if task["agent_id"] == "agent_5_qa_validation_owner")
+            self.assertIn("tests/**", qa_task["write_paths"])
+            self.assertIn("artifacts/test-results/**", qa_task["write_paths"])
+            self.assertIn("dist-mcp/**", qa_task["write_paths"])
+            self.assertIn("docs/reports/**", qa_task["write_paths"])
+            self.assertNotIn("src/**", qa_task["write_paths"])
+            self.assertIn(".env*", qa_task["deny_paths"])
+
     def test_custom_worker_family_is_policy_configured(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -2080,18 +2095,32 @@ Optional:
             "external_hard_source_isolation_required": False,
         }, adapter))
 
-    def test_macos_sandbox_preflight_is_advisory_not_hard(self) -> None:
-        result = audit_isolation_preflight(
-            policy={"redteam": {"audit_isolation": {"runtime": "macos_sandbox_exec"}}},
-            repo=Path.cwd(),
-            worker="openai-review",
-            provider="openai",
-            prompt_sha256="abc",
-            allow_network=True,
-        )
-        self.assertTrue(result.advisory_isolation)
-        self.assertFalse(result.hard_isolation)
+    def test_macos_sandbox_preflight_is_local_hard_with_host_oauth(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            home = Path(tmp) / "home"
+            (home / ".codex").mkdir(parents=True)
+            with mock.patch("sdlc.audit_runtime.sys.platform", "darwin"), mock.patch(
+                "sdlc.audit_runtime.shutil.which",
+                return_value="/usr/bin/sandbox-exec",
+            ), mock.patch("sdlc.audit_runtime.Path.home", return_value=home), mock.patch(
+                "sdlc.audit_runtime._macos_sandbox_readonly_probe",
+                return_value={"attempted": True, "passed": True, "reason": ""},
+            ):
+                result = audit_isolation_preflight(
+                    policy={"redteam": {"audit_isolation": {"runtime": "macos_sandbox_exec", "auth": {"mode": "host_oauth"}}}},
+                    repo=repo,
+                    worker="openai-review",
+                    provider="openai",
+                    prompt_sha256="abc",
+                    allow_network=True,
+                )
+        self.assertFalse(result.advisory_isolation)
+        self.assertTrue(result.hard_isolation)
         self.assertEqual(result.method, "macos_sandbox_exec")
+        self.assertEqual(result.auth_mode, "host_oauth")
+        self.assertTrue(result.attestation["host_auth"]["available"])
 
     def test_unsafe_credential_mount_disqualifies_container_isolation(self) -> None:
         home = Path(os.environ.get("HOME", "")).expanduser()
@@ -3496,6 +3525,8 @@ class WorkerCaptureTests(unittest.TestCase):
                     str(prompt),
                     "--run-id",
                     "prompt-run-fixture",
+                    "--risk",
+                    "low",
                     "--execute",
                     "--allow-network",
                     "--no-branch",
@@ -3557,6 +3588,8 @@ class WorkerCaptureTests(unittest.TestCase):
                     str(prompt),
                     "--run-id",
                     "prompt-readonly-fixture",
+                    "--risk",
+                    "low",
                     "--read-only-repo",
                     str(source),
                     "--execute",
@@ -3572,6 +3605,158 @@ class WorkerCaptureTests(unittest.TestCase):
             self.assertEqual((source / "evidence.txt").read_text(encoding="utf-8"), "keep\n")
             events = self._load_events(RunStore(repo).run_dir("prompt-readonly-fixture"))
             self.assertTrue(any(event.get("event") == "prompt_run.read_only_repo_violation" for event in events))
+
+    def test_high_risk_prompt_run_requires_release_preflight_before_worker_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            prompt = repo / ".codex" / "prompts" / "release.md"
+            prompt.parent.mkdir(parents=True)
+            prompt.write_text("# Release Fixture\n\n## Required Output Files\n\n- `docs/result.md`\n", encoding="utf-8")
+            marker = repo / "worker-ran"
+            _script, old_path = self._install_fake_worker(
+                repo,
+                "codex",
+                f"#!/bin/sh\ncat >/dev/null\nprintf ran > {str(marker)!r}\nmkdir -p docs\nprintf ok > docs/result.md\n",
+            )
+            old_attestation = os.environ.get("SDLC_ATTESTATION_KEY_FILE")
+            os.environ["SDLC_ATTESTATION_KEY_FILE"] = str(repo / "missing-attestation.key")
+            try:
+                result = main([
+                    "--repo",
+                    str(repo),
+                    "prompt",
+                    "run",
+                    str(prompt),
+                    "--run-id",
+                    "prompt-release-preflight",
+                    "--execute",
+                    "--allow-network",
+                    "--no-branch",
+                    "--timeout",
+                    "30",
+                ])
+            finally:
+                os.environ["PATH"] = old_path
+                if old_attestation is None:
+                    os.environ.pop("SDLC_ATTESTATION_KEY_FILE", None)
+                else:
+                    os.environ["SDLC_ATTESTATION_KEY_FILE"] = old_attestation
+            self.assertEqual(result, 3)
+            self.assertFalse(marker.exists())
+            run_dir = RunStore(repo).run_dir("prompt-release-preflight")
+            preflight = read_json(run_dir / "artifacts" / "release" / "preflight.json")
+            self.assertEqual(preflight["status"], "NO_GO")
+            blocker_ids = {item["requirement_id"] for item in preflight["blockers"]}
+            self.assertIn("git-repo", blocker_ids)
+            self.assertIn("attestation-key", blocker_ids)
+            progress = read_json(run_dir / "artifacts" / "prompt-run" / "progress.json")
+            self.assertIn(("release_preflight", "NO_GO"), [(item["phase"], item["status"]) for item in progress["phases"]])
+
+    def test_release_doctor_reports_recurring_release_prerequisites(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            run_id = "release-doctor-blockers"
+            self.assertEqual(main(["--repo", str(repo), "init"]), 0)
+            self.assertEqual(main(["--repo", str(repo), "plan", "High risk release", "--run-id", run_id, "--risk", "high"]), 0)
+            ensure_git_fixture(repo, run_id)
+            old_attestation = os.environ.get("SDLC_ATTESTATION_KEY_FILE")
+            old_actor = os.environ.get("SDLC_ACTOR_PROOF_KEY_FILE")
+            old_actor_value = os.environ.get("SDLC_ACTOR_PROOF_KEY")
+            os.environ["SDLC_ATTESTATION_KEY_FILE"] = str(repo / "missing-attestation.key")
+            os.environ["SDLC_ACTOR_PROOF_KEY_FILE"] = str(repo / "missing-actor.key")
+            os.environ.pop("SDLC_ACTOR_PROOF_KEY", None)
+            output = io.StringIO()
+            try:
+                with mock.patch("sdlc.release.Path.home", return_value=repo / "missing-home"), mock.patch(
+                    "sdlc.audit_runtime.Path.home",
+                    return_value=repo / "missing-home",
+                ), mock.patch("sdlc.audit_runtime.sys.platform", "linux"), redirect_stdout(output):
+                    result = main(["--repo", str(repo), "release", "doctor", run_id, "--json"])
+            finally:
+                if old_attestation is None:
+                    os.environ.pop("SDLC_ATTESTATION_KEY_FILE", None)
+                else:
+                    os.environ["SDLC_ATTESTATION_KEY_FILE"] = old_attestation
+                if old_actor is None:
+                    os.environ.pop("SDLC_ACTOR_PROOF_KEY_FILE", None)
+                else:
+                    os.environ["SDLC_ACTOR_PROOF_KEY_FILE"] = old_actor
+                if old_actor_value is None:
+                    os.environ.pop("SDLC_ACTOR_PROOF_KEY", None)
+                else:
+                    os.environ["SDLC_ACTOR_PROOF_KEY"] = old_actor_value
+            self.assertNotEqual(result, 0)
+            payload = json.loads(output.getvalue())
+            blocker_ids = {item["requirement_id"] for item in payload["blockers"]}
+            self.assertIn("redteam-local-sandbox", blocker_ids)
+            self.assertIn("redteam-audit-auth", blocker_ids)
+            self.assertIn("attestation-key", blocker_ids)
+            self.assertIn("actor-proof-key", blocker_ids)
+            self.assertIn("scanner-policy", blocker_ids)
+
+    def test_release_doctor_passes_with_clean_branch_keys_scanner_and_local_host_oauth(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            for name in ("pip-audit",):
+                script = bin_dir / name
+                script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                script.chmod(0o755)
+            home = root / "home"
+            (home / ".codex").mkdir(parents=True)
+            attestation_key = root / "attestation.key"
+            actor_key = root / "actor-proof.key"
+            attestation_key.write_text("attestation signing key\n", encoding="utf-8")
+            actor_key.write_text("actor proof key\n", encoding="utf-8")
+            run_id = "release-doctor-go"
+            old_path = os.environ.get("PATH", "")
+            old_attestation = os.environ.get("SDLC_ATTESTATION_KEY_FILE")
+            old_actor = os.environ.get("SDLC_ACTOR_PROOF_KEY_FILE")
+            os.environ["PATH"] = f"{bin_dir}{os.pathsep}{old_path}"
+            os.environ["SDLC_ATTESTATION_KEY_FILE"] = str(attestation_key)
+            os.environ["SDLC_ACTOR_PROOF_KEY_FILE"] = str(actor_key)
+            try:
+                self.assertEqual(main(["--repo", str(repo), "init"]), 0)
+                self.assertEqual(main(["--repo", str(repo), "plan", "High risk release", "--run-id", run_id, "--risk", "high"]), 0)
+                policy = read_json(repo / ".sdlc" / "policies" / "default.json")
+                policy["network_allowed"] = True
+                policy["redteam"]["audit_isolation"] = {
+                    "runtime": "macos_sandbox_exec",
+                    "network_mode": "host",
+                    "auth": {"mode": "host_oauth"},
+                    "auth_env": [],
+                }
+                write_json(repo / ".sdlc" / "policies" / "default.json", policy)
+                ensure_git_fixture(repo, run_id)
+                output = io.StringIO()
+                with mock.patch("sdlc.release.Path.home", return_value=home), mock.patch(
+                    "sdlc.audit_runtime.Path.home",
+                    return_value=home,
+                ), mock.patch("sdlc.audit_runtime.sys.platform", "darwin"), mock.patch(
+                    "sdlc.audit_runtime.shutil.which",
+                    return_value="/usr/bin/sandbox-exec",
+                ), mock.patch(
+                    "sdlc.audit_runtime._macos_sandbox_readonly_probe",
+                    return_value={"attempted": True, "passed": True, "reason": ""},
+                ), redirect_stdout(output):
+                    result = main(["--repo", str(repo), "release", "doctor", run_id, "--json"])
+            finally:
+                os.environ["PATH"] = old_path
+                if old_attestation is None:
+                    os.environ.pop("SDLC_ATTESTATION_KEY_FILE", None)
+                else:
+                    os.environ["SDLC_ATTESTATION_KEY_FILE"] = old_attestation
+                if old_actor is None:
+                    os.environ.pop("SDLC_ACTOR_PROOF_KEY_FILE", None)
+                else:
+                    os.environ["SDLC_ACTOR_PROOF_KEY_FILE"] = old_actor
+            self.assertEqual(result, 0, output.getvalue())
+            payload = json.loads(output.getvalue())
+            self.assertEqual(payload["status"], "GO")
+            self.assertEqual(payload["blockers"], [])
 
     def test_engine_snapshot_tracks_control_plane_run_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3630,9 +3815,9 @@ class WorkerCaptureTests(unittest.TestCase):
             result = adapter.run(prompt, repo, "SECURITY_REVIEW_AUDIT_WORKSPACE", execute=True)
             self.assertTrue(result.executed)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertFalse(result.hard_audit_isolation)
-            self.assertTrue(result.advisory_audit_isolation)
-            self.assertEqual(result.advisory_audit_isolation_method, "macos_sandbox_exec")
+            self.assertTrue(result.hard_audit_isolation)
+            self.assertEqual(result.hard_audit_isolation_method, "macos_sandbox_exec")
+            self.assertFalse(result.advisory_audit_isolation)
             self.assertIn("sandbox-exec", Path(result.command[0]).name)
             self.assertFalse(source_marker.exists())
             writable_paths = []
@@ -3660,6 +3845,47 @@ class WorkerCaptureTests(unittest.TestCase):
         self.assertNotIn("--sandbox", transformed)
         self.assertNotIn("read-only", transformed)
         self.assertEqual(transformed[-1], "-")
+
+    def test_container_hard_audit_disables_codex_nested_sandbox(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            prompt = repo / ".sdlc" / "runs" / "container-run" / "prompts" / "redteam_prompt.md"
+            prompt.parent.mkdir(parents=True)
+            prompt.write_text("audit prompt\n", encoding="utf-8")
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            codex = bin_dir / "codex"
+            codex.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            codex.chmod(0o755)
+            old_path = os.environ.get("PATH", "")
+            os.environ["PATH"] = f"{bin_dir}{os.pathsep}{old_path}"
+            adapter = CodexAdapter(model="gpt-test")
+            setattr(adapter, "_sdlc_audit_isolation_config", {
+                "kind": "container",
+                "engine": "/usr/bin/docker",
+                "image": "sdlc-test-image",
+                "network_mode": "none",
+                "auth_env": [],
+                "method": "container:docker",
+            })
+            try:
+                with mock.patch("sdlc.adapters.run_cmd", return_value={
+                    "returncode": 0,
+                    "stdout": "{\"verdict\":\"GO\",\"findings\":[]}\n",
+                    "stderr": "",
+                    "process_tree_cleanup_ok": True,
+                }):
+                    result = adapter.run(prompt, repo, "SECURITY_REVIEW_AUDIT_WORKSPACE", execute=True)
+            finally:
+                os.environ["PATH"] = old_path
+            self.assertTrue(result.executed)
+            self.assertTrue(result.hard_audit_isolation)
+            self.assertIn("--interactive", result.command)
+            self.assertIn("--dangerously-bypass-approvals-and-sandbox", result.command)
+            self.assertNotIn("--sandbox", result.command)
+            self.assertNotIn("read-only", result.command)
 
     def test_macos_sandbox_rejects_writable_source_overlap(self) -> None:
         if adapters_module.hard_audit_source_isolation_method() != "macos_sandbox_exec":
@@ -4400,6 +4626,11 @@ class ScannerEvidenceTests(unittest.TestCase):
             plan = store.load_plan(run_id)
             security_gate = next(gate for gate in plan.gates if gate.id == "security_scans")
             self.assertEqual(security_gate.verdict, "GO")
+            run_dir = store.run_dir(run_id)
+            detect_artifact = (run_dir / "artifacts" / "scans" / "detect-secrets.txt").read_text(encoding="utf-8")
+            checkov_artifact = (run_dir / "artifacts" / "scans" / "checkov.txt").read_text(encoding="utf-8")
+            self.assertIn("artifacts", detect_artifact)
+            self.assertIn("--skip-framework secrets", checkov_artifact)
 
     def test_pip_audit_records_dependency_manifest_binding(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4481,7 +4712,8 @@ class ScannerEvidenceTests(unittest.TestCase):
                 (repo / "app.py").write_text("print('hello')\n", encoding="utf-8")
                 self.assertEqual(main(["--repo", str(repo), "init"]), 0)
                 self.assertEqual(main(["--repo", str(repo), "plan", "Scan evidence", "--run-id", run_id]), 0)
-                self.assertNotEqual(main(["--repo", str(repo), "scan", run_id, "--fail-on-findings"]), 0)
+                with mock.patch("sdlc.scanners._tool_search_dirs", return_value=[]):
+                    self.assertNotEqual(main(["--repo", str(repo), "scan", run_id, "--fail-on-findings"]), 0)
             finally:
                 os.environ["PATH"] = old_path
 
@@ -4497,7 +4729,8 @@ class ScannerEvidenceTests(unittest.TestCase):
                 (repo / "main.tf").write_text("resource \"null_resource\" \"demo\" {}\n", encoding="utf-8")
                 self.assertEqual(main(["--repo", str(repo), "init"]), 0)
                 self.assertEqual(main(["--repo", str(repo), "plan", "Scan IaC required", "--run-id", run_id]), 0)
-                self.assertNotEqual(main(["--repo", str(repo), "scan", run_id, "--fail-on-findings"]), 0)
+                with mock.patch("sdlc.scanners._tool_search_dirs", return_value=[]):
+                    self.assertNotEqual(main(["--repo", str(repo), "scan", run_id, "--fail-on-findings"]), 0)
             finally:
                 os.environ["PATH"] = old_path
             store = RunStore(repo)
@@ -5079,6 +5312,7 @@ print(json.dumps({
                     }
                 }
                 policy["redteam"]["allowed_providers"] = ["openai"]
+                policy["redteam"]["audit_isolation"] = {"runtime": "none"}
                 write_json(repo / ".sdlc" / "policies" / "default.json", policy)
                 self.assertEqual(main([
                     "--repo", str(repo), "redteam", "execute", run_id,

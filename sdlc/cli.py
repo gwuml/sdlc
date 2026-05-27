@@ -30,6 +30,7 @@ from .models import GateState, RunPlan, Finding, invalid_findings, open_findings
 from .pipeline import DEFAULT_GATES, gates_as_dicts
 from .policies import ensure_policy_files, load_policy
 from .prompts import redteam_prompt_binding_sha256, write_prompt_bundle
+from .release import release_preflight, release_preflight_error
 from .reporting import build_report, generate_report
 from .scanners import run_security_scans, scan_notes, scan_verdict
 from .util import git_current_branch, is_git_repo, now_iso, read_json, relpath_under_base, resolve_repo_paths, resolve_under_base, run_cmd, slugify, write_json
@@ -3364,6 +3365,38 @@ def command_prompt(args: argparse.Namespace) -> int:
         extra={"branch": branch_name or plan.branch, "prompt_file": str(prompt_path)},
     )
 
+    if args.execute and plan.risk_level in {"HIGH", "EXTREME"}:
+        preflight = release_preflight(
+            repo=repo,
+            policy=load_policy(repo, plan.policy_profile),
+            policy_profile=plan.policy_profile,
+            risk_level=plan.risk_level,
+            allow_network=args.allow_network,
+            run_id=run_id,
+        )
+        Ledger(run_dir, run_id).artifact(
+            "artifacts/release/preflight.json",
+            json.dumps(preflight.to_dict(), indent=2, sort_keys=True) + "\n",
+            event="release.preflight_evaluated",
+            status=preflight.status,
+            blockers=len(preflight.blockers),
+        )
+        _prompt_run_progress(
+            ledger,
+            phase="release_preflight",
+            status=preflight.status,
+            phases=phases,
+            detail=f"Release prerequisites checked before high-risk worker execution; blockers={len(preflight.blockers)}.",
+            extra={"blockers": [item.to_dict() for item in preflight.blockers]},
+        )
+        preflight_error = release_preflight_error(preflight)
+        if preflight_error:
+            eprint(preflight_error)
+            print(f"Run ID: {run_id}")
+            print(f"Preflight: {run_dir / 'artifacts' / 'release' / 'preflight.json'}")
+            print(f"Progress: {run_dir / 'artifacts' / 'prompt-run' / 'progress.json'}")
+            return 3
+
     required_paths = _required_output_paths_from_prompt(prompt_text)
     source_rel = ledger.artifact(
         f"prompts/{prompt_path.name}",
@@ -4268,7 +4301,15 @@ def command_agents(args: argparse.Namespace) -> int:
                 Ledger(run_dir, args.run_id).event("agents.execution_rejected", reason=policy_error)
                 eprint(policy_error)
                 return 3
-            result = execute_agent_plan(run_dir, plan, policy, execute=args.execute, parallel=args.parallel, timeout=args.timeout)
+            result = execute_agent_plan(
+                run_dir,
+                plan,
+                policy,
+                execute=args.execute,
+                parallel=args.parallel,
+                timeout=args.timeout,
+                progress=None if args.json else _print_agents_progress,
+            )
         elif args.agents_command == "status":
             result = agent_status(run_dir, plan, policy)
         else:
@@ -4300,6 +4341,28 @@ def command_agents(args: argparse.Namespace) -> int:
         if statuses & {"failed", "blocked_unavailable_worker", "blocked_by_dependency", "blocked_by_permissions"}:
             return 1
     return 0
+
+
+def _print_agents_progress(event: dict[str, Any]) -> None:
+    event_name = str(event.get("event") or "")
+    if event_name == "agents.execution_started":
+        mode = "execute" if event.get("execute_requested") else "dry-run"
+        print(f"Agent {mode} started: parallelism={event.get('parallelism')}", flush=True)
+    elif event_name == "agents.task_started":
+        print(
+            f"  {event.get('agent_id')} started worker={event.get('worker')} mode={event.get('mode')}",
+            flush=True,
+        )
+    elif event_name in {"agents.task_completed", "agents.task_failed"}:
+        status = event.get("status")
+        reason = event.get("blocked_reason")
+        suffix = f" reason={reason}" if reason else ""
+        print(f"  {event.get('agent_id')} {status} returncode={event.get('returncode')}{suffix}", flush=True)
+    elif event_name == "agents.execution_completed":
+        print(
+            f"Agent execution completed: completed={event.get('completed')} blocked={event.get('blocked')}",
+            flush=True,
+        )
 
 
 def command_ledger(args: argparse.Namespace) -> int:
@@ -4384,6 +4447,52 @@ def command_tui(args: argparse.Namespace) -> int:
         print(f"  {finding.id} {finding.severity:<8} {finding.title}")
     print("=" * 80)
     return 0
+
+
+def command_release(args: argparse.Namespace) -> int:
+    repo = Path(args.repo).resolve()
+    if args.release_command != "doctor":
+        eprint(f"Unknown release command: {args.release_command}")
+        return 2
+    policy_profile = args.policy
+    risk_level = "HIGH" if args.risk == "auto" else args.risk.upper()
+    run_id = args.run_id
+    prompt_sha256 = ""
+    if run_id:
+        store = RunStore(repo)
+        plan = store.load_plan(run_id)
+        policy_profile = plan.policy_profile
+        risk_level = plan.risk_level
+        prompt_manifest = read_json(store.run_dir(run_id) / "artifacts" / "prompts" / "manifest.json", {})
+        prompt_sha256 = str(prompt_manifest.get("redteam_prompt.md") or "") if isinstance(prompt_manifest, dict) else ""
+    policy = load_policy(repo, policy_profile)
+    workers = [worker.strip() for worker in args.workers.split(",") if worker.strip()] if args.workers else None
+    result = release_preflight(
+        repo=repo,
+        policy=policy,
+        policy_profile=policy_profile,
+        risk_level=risk_level,
+        allow_network=args.allow_network,
+        workers=workers,
+        run_id=run_id,
+        prompt_sha256=prompt_sha256,
+        check_isolation_runtime=args.check_isolation_runtime,
+        require_clean_worktree=not args.no_worktree_check,
+        require_branch=not args.no_branch_check,
+    )
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+    else:
+        print(f"Release doctor: {result.status}")
+        print(f"Repo: {result.repo}")
+        print(f"Risk: {result.risk_level} | Policy: {result.policy_profile}")
+        for requirement in result.requirements:
+            block = " blocking" if requirement.blocking and requirement.status != "GO" else ""
+            print(f"  {requirement.status:<5} {requirement.title}{block}")
+            print(f"        {requirement.detail}")
+            if requirement.status != "GO":
+                print(f"        Fix: {requirement.remediation}")
+    return 1 if result.blockers else 0
 
 
 def command_report(args: argparse.Namespace) -> int:
@@ -5391,6 +5500,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_tui = sub.add_parser("tui", help="Show a terminal dashboard for a run")
     p_tui.add_argument("run_id")
     p_tui.set_defaults(func=command_tui)
+
+    p_release = sub.add_parser("release", help="Check and prepare release-lane prerequisites")
+    release_sub = p_release.add_subparsers(dest="release_command", required=True)
+    release_doctor = release_sub.add_parser("doctor", help="Fail-fast check for recurring release blockers")
+    release_doctor.add_argument("run_id", nargs="?", help="Optional run id; uses its risk and policy profile when provided.")
+    release_doctor.add_argument("--risk", default="high", choices=["auto", "low", "medium", "high", "extreme"])
+    release_doctor.add_argument("--policy", default="default")
+    release_doctor.add_argument("--workers", help="Comma-separated red-team worker families to evaluate.")
+    release_doctor.add_argument("--allow-network", action="store_true", help="Evaluate runtime/network prerequisites for executed worker commands.")
+    release_doctor.add_argument("--check-isolation-runtime", action="store_true", help="Run the configured container/VM isolation preflight probe.")
+    release_doctor.add_argument("--no-worktree-check", action="store_true", help="Do not require a clean Git worktree for this diagnostic run.")
+    release_doctor.add_argument("--no-branch-check", action="store_true", help="Do not reject protected/detached branches for this diagnostic run.")
+    release_doctor.add_argument("--json", action="store_true")
+    release_doctor.set_defaults(func=command_release)
 
     p_report = sub.add_parser("report", help="Generate final report")
     p_report.add_argument("run_id")

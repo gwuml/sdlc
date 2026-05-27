@@ -26,11 +26,11 @@ DEFAULT_POLICY: dict[str, Any] = {
         "critical_high_auto_fix_required": True,
         "implementer_cannot_close_findings": True,
         "audit_isolation": {
-            "runtime": "container",
+            "runtime": "macos_sandbox_exec",
             "container_engine": "auto",
             "container_image": "",
-            "network_mode": "none",
-            "auth": {"mode": "absent"},
+            "network_mode": "host",
+            "auth": {"mode": "host_oauth"},
             "auth_env": [],
         },
     },
@@ -128,7 +128,9 @@ HOST_OAUTH_TOOLS_POLICY: dict[str, Any] = {
         **DEFAULT_POLICY["redteam"],
         "audit_isolation": {
             **DEFAULT_POLICY["redteam"]["audit_isolation"],
-            "auth": {"mode": "brokered"},
+            "runtime": "macos_sandbox_exec",
+            "network_mode": "host",
+            "auth": {"mode": "host_oauth"},
         },
     },
 }

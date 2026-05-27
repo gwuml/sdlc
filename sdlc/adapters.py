@@ -243,9 +243,10 @@ class WorkerAdapter:
             kind = str(audit_runtime_config.get("kind") or "").strip().lower()
             if kind == "container":
                 try:
+                    container_command = _external_hard_sandbox_command(run_command)
                     run_command, env, runtime_attestation = container_audit_command(
                         config=audit_runtime_config,
-                        command=run_command,
+                        command=container_command,
                         repo=repo,
                         env=env,
                     )
@@ -532,28 +533,32 @@ def _macos_sensitive_read_deny_paths(hard_home: Path | None = None) -> list[Path
     home = Path(os.environ.get("HOME", "")).expanduser()
     if not home.is_absolute():
         return []
-    candidates = [home]
+    candidates = [
+        home / ".ssh",
+        home / ".aws",
+        home / ".gcp",
+        home / ".azure",
+        home / ".kube",
+        home / ".docker",
+        home / ".gnupg",
+        home / ".codex",
+        home / ".config" / "gh",
+        home / ".config" / "gcloud",
+        home / ".netrc",
+        home / "Library" / "Application Support" / "Codex",
+        home / "Library" / "Caches" / "Codex",
+        home / "Library" / "Logs" / "Codex",
+        home / "Desktop",
+        home / "Documents",
+        home / "Downloads",
+    ]
     if hard_home:
-        try:
-            hard_home.resolve(strict=False).relative_to(home.resolve(strict=False))
-        except ValueError:
-            pass
-        else:
-            candidates = [
-                home / ".ssh",
-                home / ".aws",
-                home / ".gcp",
-                home / ".azure",
-                home / ".kube",
-                home / ".docker",
-                home / ".gnupg",
-                home / ".config" / "gh",
-                home / ".config" / "gcloud",
-                home / ".netrc",
-                home / "Desktop",
-                home / "Documents",
-                home / "Downloads",
-            ]
+        hard_home_resolved = hard_home.resolve(strict=False)
+        candidates = [
+            path
+            for path in candidates
+            if not _paths_overlap(path.resolve(strict=False), hard_home_resolved)
+        ]
     return [path for path in candidates if path.exists()]
 
 
