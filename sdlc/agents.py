@@ -22,7 +22,7 @@ AGENT_PLAN_PATH = "artifacts/agents/task-plan.json"
 DEFAULT_AGENT_READ_PATHS = ["sdlc/**", "docs/**", "tests/**"]
 DEFAULT_AGENT_DENY_PATHS = [".env*", "secrets/**", "infra/prod/**", ".sdlc/runs/**", ".sdlc/memory.sqlite"]
 WORKSPACE_SCRATCH_DIRS = {".sdlc-redteam-tmp", ".sdlc-worker-tmp"}
-WORKSPACE_GENERATED_DIRS = {"target", "node_modules", ".next", ".turbo", "dist"}
+WORKSPACE_GENERATED_DIRS = {"target", "node_modules", ".next", ".turbo", "dist", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
 
 ROLE_DEFAULTS: dict[str, dict[str, Any]] = {
     "agent_1_pm_coordinator": {"worker": "codex", "mode": "PLAN", "write_paths": []},
