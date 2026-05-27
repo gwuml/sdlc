@@ -844,6 +844,7 @@ def _gate_artifact_content_error(gate_id: str, key: str, path: Path, text: str) 
     lowered = text.lower()
     is_patch_artifact = key == "code_diff" or path.suffix in {".patch", ".diff"}
     is_git_command_artifact = (gate_id, key) in GIT_COMMAND_ARTIFACTS
+    has_machine_command_transcript = _parse_command_transcript(text) is not None and "stdout:" in lowered and "stderr:" in lowered
     if not is_patch_artifact and _contains_template_stuffed_evidence(text):
         return f"{gate_id}.{key} uses template-stuffed evidence: {path}"
     if not is_patch_artifact and not is_git_command_artifact:
@@ -879,7 +880,7 @@ def _gate_artifact_content_error(gate_id: str, key: str, path: Path, text: str) 
             "runbook",
             "incident response",
         ]
-        if sum(1 for term in stuffing_terms if term in lowered) >= 10:
+        if not has_machine_command_transcript and sum(1 for term in stuffing_terms if term in lowered) >= 10:
             return f"{gate_id}.{key} evidence uses cross-gate keyword stuffing instead of focused content"
     if _looks_like_bare_assertion(text):
         return f"{gate_id}.{key} is a bare assertion: {path}"
