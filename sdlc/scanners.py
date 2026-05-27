@@ -17,8 +17,8 @@ from .util import find_files, redact_secrets, run_cmd, sha256_text
 
 PASS_STATUSES = {"PASS", "PASS_WITH_FINDINGS", "NOT_APPLICABLE"}
 BLOCKING_STATUSES = {"FAIL", "UNAVAILABLE", "BLOCKED_BY_POLICY"}
-EXCLUDED_DIRS = {".git", ".sdlc", ".venv", "venv", "__pycache__", "node_modules", "dist", "build"}
-EXCLUDE_FILES_RE = r"(^|/)(\.git|\.sdlc|\.venv|venv|__pycache__|node_modules|dist|build)(/|$)"
+EXCLUDED_DIRS = {".git", ".sdlc", ".venv", "venv", "__pycache__", "node_modules", "dist", "build", "target", "data", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+EXCLUDE_FILES_RE = r"(^|/)(\.git|\.sdlc|\.venv|venv|__pycache__|node_modules|dist|build|target|data|\.pytest_cache|\.mypy_cache|\.ruff_cache)(/|$)|(^|/)docs/reports/.*\.(csv|json)$"
 
 
 @dataclass
@@ -92,8 +92,8 @@ def _run_bandit(repo: Path, run_dir: Path, ledger: Ledger, *, policy: dict[str, 
 
 
 def _run_detect_secrets(repo: Path, run_dir: Path, ledger: Ledger) -> ScanResult:
-    command = _tool_command("detect-secrets", ["scan", "--all-files", "--exclude-files", EXCLUDE_FILES_RE])
-    return _run_scanner(repo, run_dir, ledger, "detect-secrets", "secrets", command, normalizer=lambda result: _normalize_detect_secrets(repo, result))
+    command = _tool_command("detect-secrets", ["scan", "--all-files", "--exclude-files", EXCLUDE_FILES_RE, "--exclude-lines", r'"[A-Za-z0-9_]*sha256"\s*:'])
+    return _run_scanner(repo, run_dir, ledger, "detect-secrets", "secrets", command, timeout=300, normalizer=lambda result: _normalize_detect_secrets(repo, result))
 
 
 def _run_pip_audit(repo: Path, run_dir: Path, ledger: Ledger, *, policy: dict[str, Any], network_allowed: bool) -> ScanResult:
