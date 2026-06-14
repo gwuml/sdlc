@@ -5,6 +5,7 @@
 //! parity harness. Commands not yet ported print a clear not-implemented notice
 //! and exit non-zero so they are never silently mistaken for the reference.
 
+mod engine;
 mod models;
 
 use clap::{Parser, Subcommand};
