@@ -1,0 +1,83 @@
+# Release workflow — the ONLY authorized path to produce release assets (FAC 9, 17).
+#
+# Phase 0 status: GUARDED STUB. The build/sign/SBOM/reproducibility steps are
+# intentionally non-functional (`exit 1`) so this workflow cannot produce a real
+# release asset until Phase 6 implements them. The trigger guards, runner pins, and
+# toolchain verification are real and active now.
+name: release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: write   # needed to create GitHub Releases in Phase 6
+
+jobs:
+  guard:
+    # Fail fast if invoked from anything other than main or a v* tag.
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Verify release ref
+        run: |
+          ref="${GITHUB_REF}"
+          echo "ref=$ref"
+          case "$ref" in
+            refs/heads/main|refs/tags/v*) echo "authorized release ref" ;;
+            *) echo "::error::releases may only be cut from main or v* tags"; exit 1 ;;
+          esac
+
+  build:
+    needs: guard
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-22.04
+            target: aarch64-unknown-linux-gnu
+          - runner: macos-14
+            target: aarch64-apple-darwin
+          - runner: macos-14
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned toolchain
+        run: |
+          rustup toolchain install "$(grep -E '^channel' rust-toolchain.toml | sed -E 's/.*"(.*)".*/\1/')"
+          rustup target add "${{ matrix.target }}"
+
+      - name: Verify active toolchain matches rust-toolchain.toml (FAC 9, 18)
+        run: |
+          pinned="$(grep -E '^channel' rust-toolchain.toml | sed -E 's/.*"(.*)".*/\1/')"
+          active="$(rustc --version | awk '{print $2}')"
+          echo "pinned=$pinned active=$active"
+          if [ "$pinned" != "$active" ]; then
+            echo "::error::active toolchain $active != pinned $pinned"; exit 1
+          fi
+
+      - name: Build (Phase 6 — not yet implemented)
+        run: |
+          echo "::error::cross-build, codesign/notarize, SBOM content-equality, \
+            reproducibility double-build, and signing are implemented in Phase 6"
+          exit 1
+
+  hundred-x-claim-gate:
+    needs: guard
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fail on unsupported "100x" claims in the final report (FAC 20)
+        run: |
+          report="artifacts/bench/report.md"
+          if [ -f "$report" ] && grep -Eiq '100x' "$report"; then
+            if ! grep -q "100x superiority was not proven" "$report" \
+               && ! grep -Eq 'measured .*100x.*before.*after' "$report"; then
+              echo "::error::unsupported 100x claim without benchmark evidence"; exit 1
+            fi
+          fi
+          echo "100x-claim gate passed (no report yet, or claim is evidence-backed)"

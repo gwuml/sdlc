@@ -336,3 +336,11 @@ Still to build:
 ```bash
 python -m unittest discover -s tests
 ```
+
+## Privacy
+
+The control plane is local-first and transmits nothing off-machine by default. For
+exactly what data is handled, what leaves the machine only with explicit consent, how
+consent is recorded and revoked, and what the local memory store retains, see
+[privacy.md](privacy.md).
+
