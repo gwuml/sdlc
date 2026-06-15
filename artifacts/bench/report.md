@@ -1,0 +1,27 @@
+# Benchmark Report
+
+Runs evaluated: 22
+Measured dimensions: 8/12
+Overall score (mean of measured): 82.9
+
+## Claim discipline
+
+100x superiority was not proven. Dimensions without measurement are marked
+UNAVAILABLE, not scored.
+
+## Dimensions
+
+| # | Dimension | Status | Value | Score | Detail |
+|---|-----------|--------|-------|-------|--------|
+| 1 | setup_friction | UNAVAILABLE | — | — | No setup-friction harness yet; requires timed clean-machine install (Phase: TUI/bench follow-up). |
+| 2 | blocker_visibility | MEASURED | 0.0015 | 100.0 | Computed readiness and located first blocking gate (intake_scope) for run 'audit-container-hard-isolation-20260525'. |
+| 3 | evidence_completeness | MEASURED | 84.2 | 84.2 | 234/278 executed gates across 22 runs carry evidence. |
+| 4 | hallucination_count | MEASURED | 0 | 100.0 | Scanned 18 reports; 0 unsupported claim candidates. |
+| 5 | redteam_independence | MEASURED | 100.0 | 100.0 | 16/16 HIGH/EXTREME runs assign a red-team worker distinct from the implementer. |
+| 6 | resume_recovery | UNAVAILABLE | — | — | Resume is not implemented in the reference engine. |
+| 7 | failed_tool_visibility | MEASURED | 37.5 | 37.5 | 3/8 scan summaries surface tool status explicitly. |
+| 8 | release_readiness_accuracy | MEASURED | 100.0 | 100.0 | 22/22 runs: release verdict is consistent with blocker presence. |
+| 9 | tui_task_completion | UNAVAILABLE | — | — | TUI not yet built; the 10-task TUI benchmark requires an independent reviewer. |
+| 10 | provider_flexibility | MEASURED | 4 | 100.0 | Worker CLIs on PATH: ['codex', 'claude', 'gemini', 'ollama'] (target >= 3). |
+| 11 | cost_token_visibility | UNAVAILABLE | — | — | Cost/token usage is not tracked by the engine. |
+| 12 | github_pr_provenance | MEASURED | 41.7 | 41.7 | 5/12 git-active runs have ledger-backed provenance. |

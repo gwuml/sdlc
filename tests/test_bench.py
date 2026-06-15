@@ -1,0 +1,73 @@
+"""Tests for the measured benchmark harness (sdlc/bench.py)."""
+
+from __future__ import annotations
+
+import unittest
+from pathlib import Path
+
+from sdlc import bench
+
+
+class BenchHelperTests(unittest.TestCase):
+    def test_measured_clamps_and_rounds_score(self) -> None:
+        d = bench._measured(7, 142.5, "x", "detail")
+        self.assertEqual(d["status"], "MEASURED")
+        self.assertEqual(d["score"], 100.0)  # clamped to 100
+        d2 = bench._measured(7, -5, "x", "detail")
+        self.assertEqual(d2["score"], 0.0)  # clamped to 0
+
+    def test_unavailable_has_no_score(self) -> None:
+        d = bench._unavailable("no tooling")
+        self.assertEqual(d["status"], "UNAVAILABLE")
+        self.assertIsNone(d["score"])
+        self.assertEqual(d["detail"], "no tooling")
+
+    def test_compare_tolerates_freeform_baseline(self) -> None:
+        before = {"overall_score": None, "dimensions": {"1_x": "UNAVAILABLE — old"}}
+        after = {"overall_score": 80.0, "dimensions": {"1_x": bench._measured(1, 80, "u", "d")}}
+        diff = bench.compare(before, after)
+        self.assertEqual(diff["dimensions"]["1_x"]["before"], "UNAVAILABLE")
+        self.assertEqual(diff["dimensions"]["1_x"]["after"], "MEASURED")
+        self.assertEqual(diff["dimensions"]["1_x"]["after_score"], 80.0)
+
+    def test_report_states_100x_not_proven(self) -> None:
+        result = bench.measure(_repo(), _stub_readiness)
+        md = bench.report_markdown(result)
+        self.assertIn("100x superiority was not proven", md)
+
+
+class BenchMeasureTests(unittest.TestCase):
+    def test_measure_returns_all_twelve_dimensions(self) -> None:
+        result = bench.measure(_repo(), _stub_readiness)
+        self.assertEqual(result["total_dimensions"], 12)
+        self.assertEqual(len(result["dimensions"]), 12)
+        for dim in result["dimensions"].values():
+            self.assertIn(dim["status"], {"MEASURED", "UNAVAILABLE"})
+            if dim["status"] == "MEASURED":
+                self.assertIsInstance(dim["score"], float)
+                self.assertGreaterEqual(dim["score"], 0.0)
+                self.assertLessEqual(dim["score"], 100.0)
+
+    def test_unmeasured_dimensions_are_honest(self) -> None:
+        # Dimensions with no tooling must be UNAVAILABLE, never a fabricated score.
+        result = bench.measure(_repo(), _stub_readiness)
+        for key in ["6_resume_recovery", "9_tui_task_completion", "11_cost_token_visibility"]:
+            self.assertEqual(result["dimensions"][key]["status"], "UNAVAILABLE")
+
+
+def _repo() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def _stub_readiness(run_id: str) -> dict:
+    # Deterministic readiness so the test does not depend on engine internals:
+    # blockers present and not satisfied (consistent => accuracy dimension scores high).
+    return {
+        "release_satisfied": False,
+        "blockers": ["stub blocker"],
+        "gate_readiness": [{"gate_id": "intake_scope", "release_state": "BLOCKED"}],
+    }
+
+
+if __name__ == "__main__":
+    unittest.main()
