@@ -1,0 +1,17 @@
+[
+  {
+    "closed_by": null,
+    "closure_evidence": [],
+    "evidence": [
+      "risk_level in HIGH/EXTREME",
+      "security_scans.verdict != GO"
+    ],
+    "id": "HIGH-002",
+    "impact": "Security or operational flaws may be missed before a user relies on the output.",
+    "owner": "agent_8_cybersecurity_engineer",
+    "required_fix": "Run SAST/dependency/secret/IaC scans or document unavailable tools with compensating manual review evidence.",
+    "severity": "HIGH",
+    "status": "OPEN",
+    "title": "High-stakes run lacks completed security scan evidence"
+  }
+]

@@ -74,7 +74,9 @@ struct RunPlan {
 }
 
 fn runs_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join(".sdlc/runs")
+    // Committed, self-contained fixtures so parity passes on a clean clone
+    // (`.sdlc/runs` is gitignored and empty on a fresh checkout).
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/runs")
 }
 
 /// Compare two JSON values for semantic equality (object key order ignored).

@@ -30,7 +30,7 @@ fn final_verdict_matches_python_oracle_for_every_fixture() {
         serde_json::from_str(&fs::read_to_string(manifest("tests/parity/final_verdicts.json")).unwrap())
             .unwrap();
 
-    let runs_dir = manifest(".sdlc/runs");
+    let runs_dir = manifest("tests/fixtures/runs"); // self-contained; clean-clone safe
     let mut checked = 0;
     for entry in fs::read_dir(&runs_dir).unwrap() {
         let dir = entry.unwrap().path();

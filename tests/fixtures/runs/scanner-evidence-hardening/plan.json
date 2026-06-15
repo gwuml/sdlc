@@ -1,0 +1,415 @@
+{
+  "agents": [
+    {
+      "id": "agent_1_pm_coordinator",
+      "role": "PM/coordinator, scope control, dependency graph, GO/NO-GO calls"
+    },
+    {
+      "id": "agent_2_architecture_contracts",
+      "role": "Architecture, contracts, invariants, tradeoffs"
+    },
+    {
+      "id": "agent_3_implementation_owner",
+      "role": "Implementation owner for constrained code changes"
+    },
+    {
+      "id": "agent_4_evidence_reporting_owner",
+      "role": "Evidence, data, replay, traceability, final reporting"
+    },
+    {
+      "id": "agent_5_qa_validation_owner",
+      "role": "QA, focused tests, fixtures, integration, smoke validation"
+    },
+    {
+      "id": "agent_6_redteam_deploy_rollback",
+      "role": "Brutal red-team, deploy lock, rollback, post-deploy verification"
+    }
+  ],
+  "branch": "unknown",
+  "classification": {
+    "activated_agents": [
+      {
+        "id": "agent_1_pm_coordinator",
+        "role": "PM/coordinator, scope control, dependency graph, GO/NO-GO calls"
+      },
+      {
+        "id": "agent_2_architecture_contracts",
+        "role": "Architecture, contracts, invariants, tradeoffs"
+      },
+      {
+        "id": "agent_3_implementation_owner",
+        "role": "Implementation owner for constrained code changes"
+      },
+      {
+        "id": "agent_4_evidence_reporting_owner",
+        "role": "Evidence, data, replay, traceability, final reporting"
+      },
+      {
+        "id": "agent_5_qa_validation_owner",
+        "role": "QA, focused tests, fixtures, integration, smoke validation"
+      },
+      {
+        "id": "agent_6_redteam_deploy_rollback",
+        "role": "Brutal red-team, deploy lock, rollback, post-deploy verification"
+      }
+    ],
+    "has_data_or_evidence": true,
+    "has_infra": false,
+    "has_security": false,
+    "has_ui": false,
+    "high_stakes": false,
+    "reasons": [
+      "Data/evidence/reporting surface detected"
+    ],
+    "risk_level": "MEDIUM"
+  },
+  "created_at": "2026-05-20T18:33:46-04:00",
+  "direct_main_push_allowed": false,
+  "feature": "Add scanner evidence hardening",
+  "gates": [
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/intake_scope.md"
+      ],
+      "id": "intake_scope",
+      "notes": "Dry deterministic artifact captured. Production use requires reviewing evidence quality.",
+      "order": 1,
+      "owner": "agent_1_pm_coordinator",
+      "state": "GO",
+      "title": "Intake, scope, and ambiguity reduction",
+      "verdict": "GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/stakeholders_raci.md"
+      ],
+      "id": "stakeholders_raci",
+      "notes": "Dry deterministic artifact captured. Production use requires reviewing evidence quality.",
+      "order": 2,
+      "owner": "agent_1_pm_coordinator",
+      "state": "GO",
+      "title": "Stakeholders, RACI, and approval authority",
+      "verdict": "GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/mission_non_goals.md"
+      ],
+      "id": "mission_non_goals",
+      "notes": "Dry deterministic artifact captured. Production use requires reviewing evidence quality.",
+      "order": 3,
+      "owner": "agent_1_pm_coordinator",
+      "state": "GO",
+      "title": "Mission, non-goals, and claim discipline",
+      "verdict": "GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/repo_context_env_branch.md"
+      ],
+      "id": "repo_context_env_branch",
+      "notes": "Dry deterministic artifact captured. Production use requires reviewing evidence quality.",
+      "order": 4,
+      "owner": "agent_1_pm_coordinator",
+      "state": "GO",
+      "title": "Repo, production, branch, and environment context",
+      "verdict": "GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/risk_blast_radius.md"
+      ],
+      "id": "risk_blast_radius",
+      "notes": "Dry deterministic artifact captured. Production use requires reviewing evidence quality.",
+      "order": 5,
+      "owner": "agent_1_pm_coordinator",
+      "state": "GO",
+      "title": "Risk classification and blast-radius controls",
+      "verdict": "GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/data_privacy_secrets.md"
+      ],
+      "id": "data_privacy_secrets",
+      "notes": "Dry deterministic artifact captured. Production use requires reviewing evidence quality.",
+      "order": 6,
+      "owner": "agent_8_cybersecurity_engineer",
+      "state": "GO",
+      "title": "Data, privacy, secrets, and exfiltration policy",
+      "verdict": "GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/baseline_freeze.md"
+      ],
+      "id": "baseline_freeze",
+      "notes": "Dry deterministic artifact captured. Production use requires reviewing evidence quality.",
+      "order": 7,
+      "owner": "agent_1_pm_coordinator",
+      "state": "GO",
+      "title": "Baseline/freeze gate and reproducibility snapshot",
+      "verdict": "GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/supply_chain_sbom.md"
+      ],
+      "id": "supply_chain_sbom",
+      "notes": "Dry deterministic artifact captured. Production use requires reviewing evidence quality.",
+      "order": 8,
+      "owner": "agent_8_cybersecurity_engineer",
+      "state": "GO",
+      "title": "Supply-chain, dependency, SBOM, and license review",
+      "verdict": "GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/agent_plan_permissions.md"
+      ],
+      "id": "agent_plan_permissions",
+      "notes": "Dry deterministic artifact captured. Production use requires reviewing evidence quality.",
+      "order": 9,
+      "owner": "agent_1_pm_coordinator",
+      "state": "GO",
+      "title": "Agent plan, dependency graph, write ownership, and permissions",
+      "verdict": "GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/architecture_contracts.md"
+      ],
+      "id": "architecture_contracts",
+      "notes": "Dry deterministic artifact captured. Production use requires reviewing evidence quality.",
+      "order": 10,
+      "owner": "agent_2_architecture_contracts",
+      "state": "GO",
+      "title": "Architecture, contracts, invariants, and failure modes",
+      "verdict": "GO"
+    },
+    {
+      "conditional_on": "has_ui",
+      "evidence": [],
+      "id": "ui_architecture_accessibility",
+      "notes": "Conditional gate skipped because has_ui=false",
+      "order": 11,
+      "owner": "agent_7_ui_architect",
+      "state": "SKIPPED",
+      "title": "UI architecture, UX states, accessibility, and dark-pattern review",
+      "verdict": "SKIPPED"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/threat_model_abuse_cases.md"
+      ],
+      "id": "threat_model_abuse_cases",
+      "notes": "Dry deterministic artifact captured. Production use requires reviewing evidence quality.",
+      "order": 12,
+      "owner": "agent_8_cybersecurity_engineer",
+      "state": "GO",
+      "title": "Threat model, abuse cases, misuse cases, and adversarial assumptions",
+      "verdict": "GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/implementation_plan_changeset.md"
+      ],
+      "id": "implementation_plan_changeset",
+      "notes": "Dry deterministic artifact captured. Production use requires reviewing evidence quality.",
+      "order": 13,
+      "owner": "agent_3_implementation_owner",
+      "state": "GO",
+      "title": "Implementation plan and minimal change-set contract",
+      "verdict": "GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/implementation.md"
+      ],
+      "id": "implementation",
+      "notes": "Real worker evidence required; dry-run cannot mark this gate GO.",
+      "order": 14,
+      "owner": "agent_3_implementation_owner",
+      "state": "FIX_REQUIRED",
+      "title": "Implementation with constrained write ownership",
+      "verdict": "NO_GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/deterministic_quality.md"
+      ],
+      "id": "deterministic_quality",
+      "notes": "Dry deterministic artifact captured. Production use requires reviewing evidence quality.",
+      "order": 15,
+      "owner": "agent_5_qa_validation_owner",
+      "state": "GO",
+      "title": "Deterministic quality gate: format, lint, typecheck, static checks",
+      "verdict": "GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/qa_tests_integration_smoke.md"
+      ],
+      "id": "qa_tests_integration_smoke",
+      "notes": "Dry deterministic artifact captured. Production use requires reviewing evidence quality.",
+      "order": 16,
+      "owner": "agent_5_qa_validation_owner",
+      "state": "GO",
+      "title": "QA: focused tests, fixtures, integration, regression, and smoke tests",
+      "verdict": "GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/scans/bandit.txt",
+        "artifacts/scans/detect-secrets.txt",
+        "artifacts/scans/pip-audit.txt",
+        "artifacts/scans/checkov.txt",
+        "artifacts/scans/policy.txt",
+        "artifacts/security_scan_summary.md",
+        "artifacts/scans/bandit.txt",
+        "artifacts/scans/detect-secrets.txt",
+        "artifacts/scans/pip-audit.txt",
+        "artifacts/scans/checkov.txt",
+        "artifacts/scans/policy.txt",
+        "artifacts/security_scan_summary.md",
+        "artifacts/security_scans.md"
+      ],
+      "id": "security_scans",
+      "notes": "Security scan issues require review: bandit=FAIL, pip-audit=BLOCKED_BY_POLICY\nbandit: FAIL (artifacts/scans/bandit.txt)\ndetect-secrets: PASS (artifacts/scans/detect-secrets.txt)\npip-audit: BLOCKED_BY_POLICY (artifacts/scans/pip-audit.txt)\ncheckov: NOT_APPLICABLE (artifacts/scans/checkov.txt)\npolicy: PASS (artifacts/scans/policy.txt)",
+      "order": 17,
+      "owner": "agent_8_cybersecurity_engineer",
+      "state": "NO_GO",
+      "title": "Security scans: SAST, dependency, secrets, IaC, and policy checks",
+      "verdict": "NO_GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/observability_runbooks.md"
+      ],
+      "id": "observability_runbooks",
+      "notes": "Dry deterministic artifact captured. Production use requires reviewing evidence quality.",
+      "order": 18,
+      "owner": "agent_9_sre_sysadmin",
+      "state": "GO",
+      "title": "Observability, telemetry, runbooks, and incident response",
+      "verdict": "GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/implementer_self_review.md"
+      ],
+      "id": "implementer_self_review",
+      "notes": "Dry deterministic artifact captured. Production use requires reviewing evidence quality.",
+      "order": 19,
+      "owner": "agent_3_implementation_owner",
+      "state": "GO",
+      "title": "Implementer self-review and claim check",
+      "verdict": "GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/independent_redteam_cross_model.md"
+      ],
+      "id": "independent_redteam_cross_model",
+      "notes": "Real worker evidence required; dry-run cannot mark this gate GO.",
+      "order": 20,
+      "owner": "agent_6_redteam_deploy_rollback",
+      "state": "NO_GO",
+      "title": "Independent brutal red-team and cross-model audit",
+      "verdict": "NO_GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/critical_high_fix_loop.md"
+      ],
+      "id": "critical_high_fix_loop",
+      "notes": "Real worker evidence required; dry-run cannot mark this gate GO.",
+      "order": 21,
+      "owner": "agent_1_pm_coordinator",
+      "state": "FIX_REQUIRED",
+      "title": "CRITICAL/HIGH automatic fix loop and second validation",
+      "verdict": "NO_GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/evidence_traceability_attestations.md"
+      ],
+      "id": "evidence_traceability_attestations",
+      "notes": "Dry deterministic artifact captured. Production use requires reviewing evidence quality.",
+      "order": 22,
+      "owner": "agent_4_evidence_reporting_owner",
+      "state": "GO",
+      "title": "Evidence traceability, provenance, and attestations",
+      "verdict": "GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/commit_branch_pr_ci.md"
+      ],
+      "id": "commit_branch_pr_ci",
+      "notes": "Dry deterministic artifact captured. Production use requires reviewing evidence quality.",
+      "order": 23,
+      "owner": "agent_1_pm_coordinator",
+      "state": "GO",
+      "title": "Commit, branch, PR, and CI gate",
+      "verdict": "GO"
+    },
+    {
+      "conditional_on": "production_rollout_allowed",
+      "evidence": [],
+      "id": "deploy_rollout_postdeploy",
+      "notes": "Conditional gate skipped because production_rollout_allowed=false",
+      "order": 24,
+      "owner": "agent_6_redteam_deploy_rollback",
+      "state": "SKIPPED",
+      "title": "Deployment, rollout, restart, monitoring, and rollback gate",
+      "verdict": "SKIPPED"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/final_report_reaudit.md"
+      ],
+      "id": "final_report_reaudit",
+      "notes": "Dry deterministic artifact captured. Production use requires reviewing evidence quality.",
+      "order": 25,
+      "owner": "agent_4_evidence_reporting_owner",
+      "state": "GO",
+      "title": "Final report, residual risks, next audit, and maintenance plan",
+      "verdict": "GO"
+    }
+  ],
+  "policy_profile": "default",
+  "production_rollout_allowed": false,
+  "repo": "/Users/rmallarapu/dev/sdlc-control-plane",
+  "risk_level": "MEDIUM",
+  "run_id": "scanner-evidence-hardening",
+  "worker_preferences": {
+    "architecture": "claude",
+    "implementation": "codex",
+    "qa": "codex",
+    "redteam": "claude"
+  }
+}

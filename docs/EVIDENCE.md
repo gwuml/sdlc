@@ -13,32 +13,33 @@ different category from a general coding agent (e.g. Claude Code), whose strengt
 (in-editor edits, IDE integration, checkpoints) are not contested. We do **not**
 claim "100x better than Claude Code": **100x superiority was not proven.**
 
-## Measured benchmark (23 runs on this repo)
+## Measured benchmark (corpus-relative)
 
-Overall score (mean of measured dimensions): **88.0** — **12 of 12** dimensions measured.
+**Headline score: 75.2 — the mean of the 5 CORPUS dimensions only**, and it is
+**relative to the evaluated run corpus**, not an absolute tool-quality constant
+(re-running on a different corpus moves it). A brutal red-team audit flagged the
+earlier "88.0 / 12-of-12" framing as overstated because it averaged in dimensions
+that are near-constant, environment-specific, definitional, or self-attested. Each
+dimension is now tagged by **kind**, and only CORPUS dimensions count toward the headline.
 
-| # | Dimension | Status | Score |
-|---|-----------|--------|-------|
-| 1 | setup friction | MEASURED | 100.0 |
-| 2 | blocker visibility | MEASURED | 100.0 |
-| 3 | evidence completeness | MEASURED | 85.4 |
-| 4 | hallucination count | MEASURED | 100.0 |
-| 5 | red-team independence | MEASURED | 100.0 |
-| 6 | resume recovery | MEASURED | 100.0 |
-| 7 | failed-tool visibility | MEASURED | 44.4 |
-| 8 | release-readiness accuracy | MEASURED | 100.0 |
-| 9 | TUI task completion | MEASURED | 80.0 (independent reviewer APPROVED; holistic sign-off at the 8/10 spec threshold) |
-| 10 | provider flexibility | MEASURED | 100.0 |
-| 11 | cost / token visibility | MEASURED | 100.0 (usage extractor surfaces anthropic/openai/gemini; explicit UNAVAILABLE when absent) |
-| 12 | github PR provenance | MEASURED | 46.2 |
-
-The TUI score comes from an independent reviewer (not the builder) attesting APPROVED
-(`artifacts/bench/tui_review.json`). It is credited conservatively at the spec's 8/10
-pass threshold rather than 100, since a per-task rubric was not enumerated.
+| # | Dimension | Kind | Score | In headline? |
+|---|-----------|------|-------|--------------|
+| 2 | blocker visibility | CORPUS | 100.0 | yes |
+| 3 | evidence completeness | CORPUS | 85.4 | yes |
+| 4 | hallucination count | CORPUS | 100.0 | yes |
+| 7 | failed-tool visibility | CORPUS | 44.4 | yes (weak spot) |
+| 12 | github PR provenance | CORPUS | 46.2 | yes (weak spot) |
+| 1 | setup friction | CAPABILITY | 100.0 | no (synthetic timing) |
+| 6 | resume recovery | CAPABILITY | 100.0 | no (synthetic e2e) |
+| 11 | cost / token visibility | CAPABILITY | 100.0 | no (extractor mechanism; 0 real-run coverage) |
+| 5 | red-team independence | CONFIG | 100.0 | no (planner self-assigns) |
+| 8 | release-readiness accuracy | CONSISTENCY | 100.0 | no (tautological) |
+| 10 | provider flexibility | ENVIRONMENT | 100.0 | no (PATH-dependent) |
+| 9 | TUI task completion | ATTESTATION | 80.0 | no (operator attestation, not independently corroborated) |
 
 Honest weak spots that are visible, not hidden: **failed-tool visibility (44.4)** and
-**github provenance (46.2)** reflect the historical run corpus and are genuine areas
-to improve. They are reported, not papered over.
+**github provenance (46.2)** are genuine areas to improve, and they pull the headline
+down on purpose — that is the point.
 
 ## Dogfooding: the tool gated its own work
 
@@ -54,12 +55,30 @@ This is the system **working correctly**: it refuses to declare its own work
 release-ready without the required evidence. An evidence-driven control plane that
 rubber-stamped itself would be the failure mode.
 
+## Post-audit remediation
+
+A brutal independent red-team audit (`docs/SESSION_AUDIT_PROMPT.md`) returned NO_GO and
+found real issues, now fixed:
+
+- **FAC-10 is now enforced in the Python runtime** (not just Rust): an ACCEPTED/DEFERRED
+  CRITICAL/HIGH yields `NO_GO`; only MEDIUM and lower may be accepted as residual risk.
+  Python and Rust agree.
+- **Honest headline:** the benchmark headline now averages only CORPUS dimensions and is
+  labelled corpus-relative; tautological/config/environment/attestation/capability
+  dimensions are excluded (this is why the headline dropped from 88 to 75.2).
+- **Ledger tamper detection** now runs in plain `validate --run-id`, not only `--release`.
+- **PEM private-key redaction** added to `redact_secrets`.
+- **Parity/diff tests are self-contained** (committed `tests/fixtures/runs/`), so they
+  pass on a clean clone.
+- **Release signature verified:** `cosign verify-blob` against the `KEYS.md` identity on
+  the real `v0.1.0` assets returns **Verified OK**.
+
 ## What is proven vs. not
 
-**Proven (measured):** sub-second blocker visibility; 100% release-readiness accuracy
-on the corpus; cross-model red-team independence enforced on HIGH/EXTREME runs;
-resume preserves 100% of completed gates; 0 unsupported claims in scanned reports;
-fast setup; ≥3 worker families available.
+**Proven (measured):** sub-second blocker visibility; resume preserves 100% of completed
+gates (synthetic e2e); 0 unsupported claims in scanned reports; fast setup; ≥3 worker
+families available locally; FAC-10 enforced (Python+Rust); ledger tamper caught; the
+`v0.1.0` Sigstore signature verifies against the KEYS.md identity.
 
 **Not proven (honestly):** the "100x" claim — no comparative benchmark was run
 against another tool, so we do not assert it. The TUI has an independent reviewer's

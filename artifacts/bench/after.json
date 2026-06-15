@@ -1,7 +1,9 @@
 {
+  "corpus_relative": true,
   "dimensions": {
     "10_provider_flexibility": {
       "detail": "Worker CLIs on PATH: ['codex', 'claude', 'gemini', 'ollama'] (target >= 3).",
+      "kind": "ENVIRONMENT",
       "score": 100.0,
       "status": "MEASURED",
       "unit": "worker-families",
@@ -9,6 +11,7 @@
     },
     "11_cost_token_visibility": {
       "detail": "Usage extractor surfaced the correct result for 4/4 representative provider outputs (anthropic/openai/gemini + no-usage). Real executed worker runs surfacing usage: 0/354.",
+      "kind": "CAPABILITY",
       "score": 100.0,
       "status": "MEASURED",
       "unit": "percent",
@@ -16,27 +19,31 @@
     },
     "12_github_pr_provenance": {
       "detail": "6/13 git-active runs have ledger-backed provenance.",
+      "kind": "CORPUS",
       "score": 46.2,
       "status": "MEASURED",
       "unit": "percent",
       "value": 46.2
     },
     "1_setup_friction": {
-      "detail": "Cold `init` + first `plan` completed in 0.20s (target <300s).",
+      "detail": "Cold `init` + first `plan` completed in 0.16s (target <300s).",
+      "kind": "CAPABILITY",
       "score": 100.0,
       "status": "MEASURED",
       "unit": "seconds",
-      "value": 0.196
+      "value": 0.164
     },
     "2_blocker_visibility": {
-      "detail": "Computed readiness and located first blocking gate (intake_scope) for run 'audit-container-hard-isolation-20260525'.",
+      "detail": "Computed readiness and located first blocking gate (intake_scope) for run 'add-oauth-login-with-audit-logging-20260615-101934'.",
+      "kind": "CORPUS",
       "score": 100.0,
       "status": "MEASURED",
       "unit": "seconds",
-      "value": 0.0018
+      "value": 0.0014
     },
     "3_evidence_completeness": {
-      "detail": "258/302 executed gates across 23 runs carry evidence.",
+      "detail": "258/302 executed gates across 26 runs carry evidence.",
+      "kind": "CORPUS",
       "score": 85.4,
       "status": "MEASURED",
       "unit": "percent",
@@ -44,13 +51,15 @@
     },
     "4_hallucination_count": {
       "detail": "Scanned 19 reports; 0 unsupported claim candidates.",
+      "kind": "CORPUS",
       "score": 100.0,
       "status": "MEASURED",
       "unit": "unsupported-claims",
       "value": 0
     },
     "5_redteam_independence": {
-      "detail": "17/17 HIGH/EXTREME runs assign a red-team worker distinct from the implementer.",
+      "detail": "20/20 HIGH/EXTREME runs assign a red-team worker distinct from the implementer.",
+      "kind": "CONFIG",
       "score": 100.0,
       "status": "MEASURED",
       "unit": "percent",
@@ -58,6 +67,7 @@
     },
     "6_resume_recovery": {
       "detail": "15/15 completed gates preserved across a resume re-run.",
+      "kind": "CAPABILITY",
       "score": 100.0,
       "status": "MEASURED",
       "unit": "percent",
@@ -65,13 +75,15 @@
     },
     "7_failed_tool_visibility": {
       "detail": "4/9 scan summaries surface tool status explicitly.",
+      "kind": "CORPUS",
       "score": 44.4,
       "status": "MEASURED",
       "unit": "percent",
       "value": 44.4
     },
     "8_release_readiness_accuracy": {
-      "detail": "23/23 runs: release verdict is consistent with blocker presence.",
+      "detail": "26/26 runs: release verdict is consistent with blocker presence.",
+      "kind": "CONSISTENCY",
       "score": 100.0,
       "status": "MEASURED",
       "unit": "percent",
@@ -79,15 +91,52 @@
     },
     "9_tui_task_completion": {
       "detail": "Independent reviewer (not the builder) attested APPROVED ('TUI looks great; proceed'); holistic sign-off credited at the 8/10 spec threshold (per-task rubric would refine this).",
+      "kind": "ATTESTATION",
       "score": 80.0,
       "status": "MEASURED",
       "unit": "percent",
       "value": 80.0
     }
   },
+  "headline_dimensions": [
+    "2_blocker_visibility",
+    "3_evidence_completeness",
+    "4_hallucination_count",
+    "7_failed_tool_visibility",
+    "12_github_pr_provenance"
+  ],
+  "headline_kind": "CORPUS",
+  "headline_score": 75.2,
+  "kind_breakdown": {
+    "ATTESTATION": [
+      "9_tui_task_completion"
+    ],
+    "CAPABILITY": [
+      "1_setup_friction",
+      "6_resume_recovery",
+      "11_cost_token_visibility"
+    ],
+    "CONFIG": [
+      "5_redteam_independence"
+    ],
+    "CONSISTENCY": [
+      "8_release_readiness_accuracy"
+    ],
+    "CORPUS": [
+      "2_blocker_visibility",
+      "3_evidence_completeness",
+      "4_hallucination_count",
+      "7_failed_tool_visibility",
+      "12_github_pr_provenance"
+    ],
+    "ENVIRONMENT": [
+      "10_provider_flexibility"
+    ]
+  },
   "measured_dimensions": 12,
-  "overall_score": 88.0,
-  "runs_evaluated": 23,
-  "schema": "sdlc.bench.result/v1",
+  "note": "headline_score is the mean of CORPUS dimensions only and is relative to the evaluated run corpus; it is not an absolute tool-quality constant. Other dimensions are reported by kind (CAPABILITY/CONFIG/CONSISTENCY/ENVIRONMENT/ATTESTATION) and excluded from the headline.",
+  "overall_score": 75.2,
+  "runs_evaluated": 26,
+  "schema": "sdlc.bench.result/v2",
   "total_dimensions": 12
 }

@@ -1,12 +1,12 @@
 //! Gate engine — Rust counterpart of `sdlc/engine.py`.
 //!
 //! Phase 2 ports the release-critical decision function `final_verdict` and its
-//! gate-completion helpers. Behavior matches the Python reference EXCEPT for one
-//! deliberate, spec-mandated hardening (FAC 10): a CRITICAL or HIGH finding may
-//! never reach a positive verdict via ACCEPTED/DEFERRED status. The Python
-//! reference returns `GO_WITH_ACCEPTED_RESIDUAL_RISKS` for an ACCEPTED CRITICAL
-//! finding; the Rust binary returns `NO_GO`. This divergence is intentional and
-//! is covered by `final_verdict_blocks_accepted_critical_high` below.
+//! gate-completion helpers. Behavior matches the Python reference, including FAC 10:
+//! a CRITICAL or HIGH finding may never reach a positive verdict via ACCEPTED/
+//! DEFERRED status — it must be RESOLVED (CLOSED). Both implementations return
+//! `NO_GO` for an accepted/deferred CRITICAL/HIGH. (Earlier the Python reference had
+//! this loophole; it was closed so Python and Rust now agree.) Covered by
+//! `final_verdict_blocks_accepted_critical_high` below.
 
 use crate::models::{invalid_findings, open_findings, Finding, RunPlan};
 use serde_json::Value;
@@ -68,7 +68,7 @@ pub fn final_verdict(findings: &[Finding], plan: Option<&RunPlan>) -> String {
         return "NO_GO".into();
     }
 
-    // FAC 10 hardening (intentional divergence from the Python reference):
+    // FAC 10 (now enforced identically in the Python reference):
     // a CRITICAL or HIGH finding may NEVER be accepted/deferred into a positive
     // verdict. It must be RESOLVED (CLOSED with evidence). Any CRITICAL/HIGH that
     // is not CLOSED — including ACCEPTED or DEFERRED — blocks the release.
@@ -145,7 +145,7 @@ mod tests {
         assert_eq!(final_verdict(&f, None), "GO_WITH_ACCEPTED_RESIDUAL_RISKS");
     }
 
-    /// FAC 10: the loophole the Python reference leaves open. An ACCEPTED CRITICAL
+    /// FAC 10: an ACCEPTED CRITICAL
     /// must NOT yield a positive verdict in the Rust binary.
     #[test]
     fn final_verdict_blocks_accepted_critical_high() {

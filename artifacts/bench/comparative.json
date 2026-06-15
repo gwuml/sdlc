@@ -1,10 +1,28 @@
 {
   "factor_max": 47,
-  "factor_median": 5,
+  "factor_median": 4.0,
   "factor_min": 3,
   "metric": "artifacts inspected to identify release blockers + reasons (manual baseline) vs 1 tool command",
   "note": "Conservative steps proxy; under-counts manual effort (excludes re-deriving validation rules). Not wall-clock; not a measurement of any other product.",
   "per_run": [
+    {
+      "baseline_inspection_units": 3,
+      "factor": 3,
+      "run_id": "add-oauth-login-with-audit-logging-20260615-101934",
+      "tool_units": 1
+    },
+    {
+      "baseline_inspection_units": 3,
+      "factor": 3,
+      "run_id": "add-oauth-login-with-audit-logging-20260615-101952",
+      "tool_units": 1
+    },
+    {
+      "baseline_inspection_units": 3,
+      "factor": 3,
+      "run_id": "add-oauth-login-with-audit-logging-20260615-131553",
+      "tool_units": 1
+    },
     {
       "baseline_inspection_units": 5,
       "factor": 5,
@@ -145,7 +163,7 @@
     }
   ],
   "proven_100x": false,
-  "runs": 23,
+  "runs": 26,
   "status": "MEASURED",
   "tool_units": 1
 }
