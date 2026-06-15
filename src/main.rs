@@ -5,9 +5,8 @@
 //! parity harness. Commands not yet ported print a clear not-implemented notice
 //! and exit non-zero so they are never silently mistaken for the reference.
 
-mod engine;
-mod models;
-
+// Control-plane logic lives in the library crate (`src/lib.rs`) so the parity
+// harness can call it directly. The binary is a thin CLI front-end.
 use clap::{Parser, Subcommand};
 use std::process::ExitCode;
 
