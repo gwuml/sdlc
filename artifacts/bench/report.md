@@ -13,8 +13,8 @@ UNAVAILABLE, not scored.
 
 | # | Dimension | Status | Value | Score | Detail |
 |---|-----------|--------|-------|-------|--------|
-| 1 | setup_friction | MEASURED | 0.254 | 100.0 | Cold `init` + first `plan` completed in 0.25s (target <300s). |
-| 2 | blocker_visibility | MEASURED | 0.0016 | 100.0 | Computed readiness and located first blocking gate (intake_scope) for run 'audit-container-hard-isolation-20260525'. |
+| 1 | setup_friction | MEASURED | 0.196 | 100.0 | Cold `init` + first `plan` completed in 0.20s (target <300s). |
+| 2 | blocker_visibility | MEASURED | 0.0018 | 100.0 | Computed readiness and located first blocking gate (intake_scope) for run 'audit-container-hard-isolation-20260525'. |
 | 3 | evidence_completeness | MEASURED | 85.4 | 85.4 | 258/302 executed gates across 23 runs carry evidence. |
 | 4 | hallucination_count | MEASURED | 0 | 100.0 | Scanned 19 reports; 0 unsupported claim candidates. |
 | 5 | redteam_independence | MEASURED | 100.0 | 100.0 | 17/17 HIGH/EXTREME runs assign a red-team worker distinct from the implementer. |

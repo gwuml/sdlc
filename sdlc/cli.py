@@ -5445,9 +5445,12 @@ def command_bench(args: argparse.Namespace) -> int:
         result = bench_mod.measure(repo, readiness_fn)
         if not args.no_write:
             bench_dir.mkdir(parents=True, exist_ok=True)
+            comparative = bench_mod.comparative_blocker_identification(repo)
             write_json(bench_dir / "after.json", result)
+            write_json(bench_dir / "comparative.json", comparative)
             (bench_dir / "report.md").write_text(bench_mod.report_markdown(result), encoding="utf-8")
-            (bench_dir / "comparison_matrix.md").write_text(bench_mod.comparison_matrix_markdown(result), encoding="utf-8")
+            (bench_dir / "comparison_matrix.md").write_text(
+                bench_mod.comparison_matrix_markdown(result, comparative), encoding="utf-8")
         if args.json:
             print(json.dumps(result, indent=2, sort_keys=True))
         else:

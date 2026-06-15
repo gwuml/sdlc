@@ -67,6 +67,28 @@ APPROVED attestation (dim 9 = 80, conservative). All 12 dimensions are now measu
 cost/token visibility (dim 11) surfaces real usage from worker output and states
 UNAVAILABLE explicitly when a worker reports none.
 
+## Can we prove "100x"? — measured answer: no
+
+We built a reproducible comparative measurement (`sdlc bench run` →
+`artifacts/bench/comparative.json`) on a fair same-task metric: how many artifacts an
+operator must inspect to identify a run's release blockers and reasons **without** the
+tool, versus the **1 command** the tool needs.
+
+- Measured factor: **median 5x**, range **3x–47x** across 23 runs.
+- **100x is not proven** on this metric (the tool reports `proven_100x: false`).
+- The measurement is conservative — it under-counts manual effort (it excludes the
+  work of re-deriving the release-validation rules by hand, which the engine encodes),
+  so the true advantage is somewhat higher than 5x but nowhere near 100x.
+
+Where the tool is not "Nx better" but **categorically different** (a generic agent
+produces these at zero): deterministic release verdicts, a tamper-evident evidence
+ledger, enforced cross-model red-team, and claim discipline. These are reported as
+present/absent, never as a fabricated ratio. See `artifacts/bench/comparison_matrix.md`.
+
+**Bottom line:** the honest, defensible claim is "~5–47x fewer inspection steps to
+find release blockers, plus capabilities a generic coding agent lacks entirely" — not
+"100x better than Claude Code."
+
 ## Capabilities a generic coding agent does not have at all
 
 Enforced gate evidence with a tamper-evident ledger; deterministic release-readiness

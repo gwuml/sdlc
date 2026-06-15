@@ -404,7 +404,65 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def comparison_matrix_markdown(result: dict[str, Any]) -> str:
+def comparative_blocker_identification(repo: Path) -> dict[str, Any]:
+    """Measure a real, reproducible factor: how many artifacts an operator must
+    inspect to identify the release blockers and their reasons WITHOUT the tool,
+    versus the one command the tool needs.
+
+    Conservative by construction (it UNDER-counts the baseline effort):
+    - baseline units = plan.json + findings.json + events.jsonl + one evidence
+      artifact per gate. It does NOT count the extra effort of re-deriving the
+      release-validation rules by hand (which the readiness engine encodes), so the
+      true manual cost is higher than reported.
+    - tool units = 1 (`sdlc next` returns the blocking gates and reasons directly).
+
+    No other product is measured here; this is a same-task steps proxy, not wall-clock
+    and not a Claude Code comparison.
+    """
+    store = RunStore(repo)
+    per_run = []
+    for run in _list_runs(repo):
+        rd = store.run_dir(run)
+        units = 0
+        for base in ("plan.json", "findings.json", "events.jsonl"):
+            if (rd / base).exists():
+                units += 1
+        artifacts_dir = rd / "artifacts"
+        gate_artifacts = len(list(artifacts_dir.glob("*.md"))) if artifacts_dir.is_dir() else 0
+        units += gate_artifacts
+        per_run.append({"run_id": run, "baseline_inspection_units": units, "tool_units": 1, "factor": units})
+    factors = sorted(r["factor"] for r in per_run)
+    if not factors:
+        return {"status": "UNAVAILABLE", "reason": "no runs to compare"}
+    n = len(factors)
+    median = factors[n // 2] if n % 2 else (factors[n // 2 - 1] + factors[n // 2]) / 2
+    return {
+        "status": "MEASURED",
+        "metric": "artifacts inspected to identify release blockers + reasons (manual baseline) vs 1 tool command",
+        "runs": n,
+        "factor_min": factors[0],
+        "factor_median": round(median, 1),
+        "factor_max": factors[-1],
+        "tool_units": 1,
+        "proven_100x": factors[0] >= 100,  # honest: true only if even the WORST run clears 100x
+        "note": "Conservative steps proxy; under-counts manual effort (excludes re-deriving validation rules). "
+                "Not wall-clock; not a measurement of any other product.",
+        "per_run": per_run,
+    }
+
+
+# Capabilities a raw-artifact baseline / generic coding agent cannot produce at all
+# (category differences, reported separately — never expressed as a finite ratio).
+CAPABILITY_DIFFERENCES = [
+    "Deterministic release-readiness verdict (GO/NO_GO) computed from evidence",
+    "Tamper-evident gate-evidence ledger with chained digests",
+    "Enforced cross-model red-team independence on HIGH/EXTREME runs",
+    "Claim-discipline gate blocking unsupported release claims",
+    "Per-gate release-blocking reasons without manual rule re-derivation",
+]
+
+
+def comparison_matrix_markdown(result: dict[str, Any], comparative: dict[str, Any] | None = None) -> str:
     """Evidence-backed comparison vs generic coding agents. Only dimensions this
     tool actually measures are filled in; the generic-agent column is NOT MEASURED
     because we have not benchmarked another tool. No 'better' claim is made without
@@ -438,14 +496,39 @@ def comparison_matrix_markdown(result: dict[str, Any]) -> str:
     ]
     for label, key, note in rows:
         lines.append(f"| {label} | {cell(key)} | NOT MEASURED | {note} |")
+    if comparative and comparative.get("status") == "MEASURED":
+        c = comparative
+        proven = "YES" if c["proven_100x"] else "NO"
+        lines += [
+            "",
+            "## Measured factor: identifying release blockers",
+            "",
+            f"Task: find the release blockers and their reasons for a run. "
+            f"Metric: {c['metric']}.",
+            "",
+            f"- Tool: **{c['tool_units']} command**.",
+            f"- Manual baseline (conservative): **{c['factor_median']}x** more inspection units "
+            f"(median across {c['runs']} runs; range {c['factor_min']}x–{c['factor_max']}x).",
+            f"- **100x proven on this metric: {proven}.** "
+            + ("" if c["proven_100x"] else "The honest factor is the median above, not 100x."),
+            "",
+            f"_{c['note']}_",
+            "",
+            "## Capability differences (category, not a ratio)",
+            "",
+            "A raw-artifact baseline or generic coding agent cannot produce these at all,",
+            "so they are reported as present/absent, never as a finite multiple:",
+            "",
+            *[f"- {cap}" for cap in CAPABILITY_DIFFERENCES],
+        ]
     lines += [
         "",
         "## Honest position",
         "",
         "- We do not claim '100x better than Claude Code'. 100x superiority was not proven.",
-        "- We claim, with measured evidence, capabilities a generic coding agent does not",
-        "  have at all: enforced gate evidence, release-readiness verdicts, cross-model",
-        "  red-team independence, and claim discipline.",
+        "- The measured advantage on release-blocker identification is the factor above",
+        "  (a conservative same-task steps proxy), plus capabilities a generic agent lacks",
+        "  entirely.",
         "- The generic-agent column stays NOT MEASURED until we run an equivalent benchmark",
         "  against one; asserting 'better' without that would violate claim discipline.",
         "",

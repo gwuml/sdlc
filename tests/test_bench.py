@@ -42,6 +42,14 @@ class BenchHelperTests(unittest.TestCase):
         self.assertIn("NOT MEASURED", md)
         self.assertIn("100x superiority was not proven", md)
 
+    def test_comparative_factor_is_measured_and_not_faked(self) -> None:
+        c = bench.comparative_blocker_identification(_repo())
+        self.assertEqual(c["status"], "MEASURED")
+        self.assertEqual(c["tool_units"], 1)
+        self.assertIsInstance(c["proven_100x"], bool)
+        # proven_100x must reflect the WORST run, not be asserted optimistically.
+        self.assertEqual(c["proven_100x"], c["factor_min"] >= 100)
+
 
 class BenchMeasureTests(unittest.TestCase):
     def test_measure_returns_all_twelve_dimensions(self) -> None:

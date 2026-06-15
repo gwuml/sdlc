@@ -22,18 +22,18 @@
       "value": 46.2
     },
     "1_setup_friction": {
-      "detail": "Cold `init` + first `plan` completed in 0.25s (target <300s).",
+      "detail": "Cold `init` + first `plan` completed in 0.20s (target <300s).",
       "score": 100.0,
       "status": "MEASURED",
       "unit": "seconds",
-      "value": 0.254
+      "value": 0.196
     },
     "2_blocker_visibility": {
       "detail": "Computed readiness and located first blocking gate (intake_scope) for run 'audit-container-hard-isolation-20260525'.",
       "score": 100.0,
       "status": "MEASURED",
       "unit": "seconds",
-      "value": 0.0016
+      "value": 0.0018
     },
     "3_evidence_completeness": {
       "detail": "258/302 executed gates across 23 runs carry evidence.",
