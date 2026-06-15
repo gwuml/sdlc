@@ -937,6 +937,28 @@ class KimiAdapter(WorkerAdapter):
         return ["kimi", "--prompt", "-"]
 
 
+class OllamaAdapter(WorkerAdapter):
+    """Open / local LLMs via Ollama. Runs fully on-machine — no API key, no network
+    egress — so it is the default path for air-gapped or zero-cost workers. The model
+    is configurable via SDLC_OLLAMA_MODEL (default 'llama3')."""
+
+    name = "ollama"
+    provider = "ollama-local"
+
+    def __init__(self, model: str | None = None):
+        self.model = model or os.environ.get("SDLC_OLLAMA_MODEL", "llama3")
+
+    def build_stdin(self, prompt_path: Path, repo: Path, mode: str) -> str | None:
+        return prompt_path.read_text(encoding="utf-8") if prompt_path.exists() else ""
+
+    def build_command(self, prompt_path: Path, repo: Path, mode: str) -> list[str]:
+        # Prompt is delivered on stdin (never in argv); `ollama run <model>` reads it.
+        return ["ollama", "run", self.model]
+
+    def security_review_write_protected(self, policy: dict[str, Any] | None = None) -> bool:
+        return True
+
+
 class LocalCommandAdapter(WorkerAdapter):
     def __init__(self, name: str, command: list[str], *, security_review_protected: bool = False, provider: str = "local"):
         self.name = name
@@ -959,7 +981,39 @@ ADAPTERS: dict[str, WorkerAdapter] = {
     "claude": ClaudeAdapter(),
     "gemini": GeminiAdapter(),
     "kimi": KimiAdapter(),
+    "ollama": OllamaAdapter(),
 }
+
+
+def select_available_adapter(
+    preferences: list[str],
+    policy: dict[str, Any] | None = None,
+    *,
+    repo: Path | None = None,
+    mode: str = "PLAN",
+) -> dict[str, Any]:
+    """Fallback chain: return the first preferred worker family whose CLI is actually
+    available, trying each in order. If none are available, return an explicit
+    WORKER_UNAVAILABLE result listing what was tried — never silently skip.
+
+    Result: {"name", "adapter", "tried": [(name, reason)], "status"}.
+    """
+    repo = repo or Path(".")
+    tried: list[tuple[str, str]] = []
+    for name in preferences:
+        adapter = adapter_from_policy(name, policy) or ADAPTERS.get(name)
+        if adapter is None:
+            tried.append((name, "unknown-adapter"))
+            continue
+        try:
+            command = adapter.build_command(Path("prompt.md"), repo, mode)
+        except Exception:  # noqa: BLE001
+            tried.append((name, "no-command"))
+            continue
+        if command and shutil.which(command[0]):
+            return {"name": name, "adapter": adapter, "tried": tried, "status": "AVAILABLE"}
+        tried.append((name, f"unavailable:{command[0] if command else '?'}"))
+    return {"name": None, "adapter": None, "tried": tried, "status": "WORKER_UNAVAILABLE"}
 
 
 def adapter_from_policy(name: str, policy: dict[str, Any] | None = None) -> WorkerAdapter | None:
