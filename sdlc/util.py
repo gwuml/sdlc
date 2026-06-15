@@ -16,6 +16,8 @@ from typing import Any
 
 
 SECRET_PATTERNS = [
+    # PEM private-key blocks (RSA/EC/OPENSSH/PKCS8) — redact the whole armored block.
+    re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----", re.DOTALL),
     re.compile(r"(?i)(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)(\s*[:=]\s*)([^\s\"']+)"),
     re.compile(r"(?i)(bybit[_ -]?(?:api[_ -]?)?(?:key|secret|auth|credential|credentials|token|session|password|passphrase|private[_ -]?key))(\s*[:=]\s*)([^\s\"']+)"),
     re.compile(r"(?i)((?:mango[_-]?)?bybit(?:api)?(?:key|secret|auth|credential|credentials|token|session|password|passphrase|privatekey|apiid|keyid|accessid|accesskey|accesssecret))(\s*[:=]\s*)([^\s\"']+)"),

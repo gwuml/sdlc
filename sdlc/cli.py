@@ -3891,6 +3891,9 @@ def command_finding(args: argparse.Namespace) -> int:
         if finding.severity in {"CRITICAL", "HIGH"} and not args.human_override:
             eprint("CRITICAL/HIGH findings cannot be accepted or deferred without --human-override")
             return 3
+        # FAC-10: even a human-accepted/deferred CRITICAL/HIGH can be RECORDED for
+        # tracking, but final_verdict() will never let it reach a shippable verdict —
+        # the run stays NO_GO until the finding is fixed and CLOSED with evidence.
         if not args.reason:
             eprint("--reason is required")
             return 2
@@ -5523,6 +5526,42 @@ def command_diff(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_audit(args: argparse.Namespace) -> int:
+    """Build or execute the documented hostile session-audit checklist."""
+    from . import session_audit
+
+    repo = Path(args.repo).resolve()
+    if args.audit_command != "session":
+        eprint(f"Unknown audit command: {args.audit_command}")
+        return 2
+    plan = session_audit.build_session_audit_plan(
+        repo,
+        prompt_path=Path(args.prompt).resolve() if args.prompt else None,
+        feature_map_path=Path(args.feature_map).resolve() if args.feature_map else None,
+    )
+    result = session_audit.execute_session_audit_probes(repo, plan) if args.execute else None
+    paths: dict[str, str] = {}
+    if args.write:
+        paths = session_audit.write_session_audit_artifacts(
+            repo,
+            plan,
+            result=result,
+            output_dir=Path(args.output_dir).resolve() if args.output_dir else None,
+        )
+    if args.format == "json":
+        payload = {"plan": plan, "artifacts": paths}
+        if result is not None:
+            payload["result"] = result
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(session_audit.render_session_audit_markdown(plan, result=result))
+        if paths:
+            print("Artifacts:")
+            for label, path in paths.items():
+                print(f"  {label}: {path}")
+    return 0 if result is None or result.get("verdict") == "GO" else 1
+
+
 def command_validate(args: argparse.Namespace) -> int:
     repo = Path(args.repo).resolve()
     errors: list[str] = []
@@ -5545,6 +5584,11 @@ def command_validate(args: argparse.Namespace) -> int:
                 errors.append("Run prompt missing")
             if not args.release and not args.structural_only:
                 findings = store.load_findings(args.run_id)
+                # Detect ledger tampering even outside the release lane: a broken
+                # canonical hash-chain is a defect regardless of release intent.
+                # require_origin=False so a legitimately unsigned local ledger is not
+                # rejected, while a byte-tamper that breaks the chain still fails.
+                errors.extend(_ledger_integrity_errors(store.run_dir(args.run_id), require_origin=False))
                 blocked_gates = [
                     f"{gate.id}={gate.state}/{gate.verdict}"
                     for gate in plan.gates
@@ -5970,6 +6014,17 @@ def build_parser() -> argparse.ArgumentParser:
     d_quality.add_argument("new_run")
     d_quality.add_argument("--format", choices=["json", "md"], default="md")
     d_quality.set_defaults(func=command_diff)
+
+    p_audit = sub.add_parser("audit", help="Build and run hostile red-team audit checklists")
+    audit_sub = p_audit.add_subparsers(dest="audit_command", required=True)
+    a_session = audit_sub.add_parser("session", help="Materialize docs/SESSION_AUDIT_PROMPT.md as an executable checklist")
+    a_session.add_argument("--prompt", help="Audit prompt path. Defaults to docs/SESSION_AUDIT_PROMPT.md")
+    a_session.add_argument("--feature-map", help="Feature/gate map path. Defaults to docs/FEATURE_GATE_MAP.md")
+    a_session.add_argument("--format", choices=["md", "json"], default="md")
+    a_session.add_argument("--write", action="store_true", help="Write artifacts/session-audit/{plan.json,checklist.md}")
+    a_session.add_argument("--output-dir", help="Override audit artifact output directory")
+    a_session.add_argument("--execute", action="store_true", help="Run deterministic local audit probes. Full hostile audit remains manual/read-only.")
+    a_session.set_defaults(func=command_audit)
 
     return parser
 

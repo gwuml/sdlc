@@ -1812,11 +1812,29 @@ Optional:
             self.assertIn("Verdict: **NO_GO**", report)
             self.assertIn("Release Readiness Blockers", report)
 
-    def test_accepted_severe_findings_force_residual_final_verdict(self) -> None:
+    def test_fac10_accepted_critical_high_never_yields_positive_verdict(self) -> None:
+        # FAC-10: an ACCEPTED/DEFERRED CRITICAL or HIGH must NOT reach a positive
+        # verdict — it can be recorded but the run stays NO_GO until fixed and CLOSED.
+        for severity in ("CRITICAL", "HIGH"):
+            for status in ("ACCEPTED", "DEFERRED"):
+                finding = Finding(
+                    id=f"{severity}-{status}",
+                    severity=severity,
+                    title="Accepted severe finding",
+                    evidence=["test"],
+                    impact="Residual risk must remain visible.",
+                    required_fix="Fix and close; severe findings cannot be accepted away.",
+                    owner="human_security_owner",
+                    status=status,
+                )
+                self.assertEqual(final_verdict([finding]), "NO_GO", f"{severity}/{status}")
+
+    def test_accepted_medium_findings_force_residual_final_verdict(self) -> None:
+        # Only MEDIUM (and lower) may be accepted as residual risk.
         finding = Finding(
-            id="HIGH-ACCEPTED",
-            severity="HIGH",
-            title="Accepted severe finding",
+            id="MEDIUM-ACCEPTED",
+            severity="MEDIUM",
+            title="Accepted medium finding",
             evidence=["test"],
             impact="Residual risk must remain visible.",
             required_fix="Accept explicitly or fix.",
@@ -1843,9 +1861,9 @@ Optional:
                     gate.evidence = ["evidence.md"]
             store.save_plan(plan)
             finding = Finding(
-                id="HIGH-ACCEPTED",
-                severity="HIGH",
-                title="Accepted severe finding",
+                id="MEDIUM-ACCEPTED",
+                severity="MEDIUM",
+                title="Accepted residual finding",
                 evidence=["human accepted residual risk reason"],
                 impact="Residual risk remains.",
                 required_fix="Track the accepted risk.",
@@ -1878,9 +1896,9 @@ Optional:
                     gate.evidence = ["README.md"]
             store.save_plan(plan)
             store.save_findings(run_id, [Finding(
-                id="HIGH-ACCEPTED",
-                severity="HIGH",
-                title="Accepted severe finding",
+                id="MEDIUM-ACCEPTED",
+                severity="MEDIUM",
+                title="Accepted residual finding",
                 evidence=["human accepted residual risk reason"],
                 impact="Residual risk remains.",
                 required_fix="Track the accepted risk.",

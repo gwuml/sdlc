@@ -2343,15 +2343,22 @@ def final_verdict(findings: list[Finding], plan: RunPlan | None = None) -> str:
         return "NO_GO"
     if invalid_findings(findings):
         return "NO_GO"
-    critical_high = open_findings(findings, {"CRITICAL", "HIGH"})
-    if critical_high:
+    # FAC-10: a CRITICAL or HIGH finding may NEVER be accepted/deferred into a positive
+    # verdict. It must be RESOLVED (CLOSED with evidence). Any CRITICAL/HIGH that is not
+    # CLOSED — OPEN, FIXED_PENDING_REVIEW, ACCEPTED, or DEFERRED — blocks the release.
+    critical_high_not_closed = [
+        finding for finding in findings
+        if finding.severity in {"CRITICAL", "HIGH"} and finding.status != "CLOSED"
+    ]
+    if critical_high_not_closed:
         return "NO_GO"
     medium = open_findings(findings, {"MEDIUM"})
     if medium:
         return "NO_GO"
+    # Only MEDIUM (and lower) may be accepted/deferred as residual risk.
     accepted_or_deferred = [
         finding for finding in findings
-        if finding.status in {"ACCEPTED", "DEFERRED"} and finding.severity in {"CRITICAL", "HIGH", "MEDIUM"}
+        if finding.status in {"ACCEPTED", "DEFERRED"} and finding.severity == "MEDIUM"
     ]
     if accepted_or_deferred:
         return "GO_WITH_ACCEPTED_RESIDUAL_RISKS"
