@@ -5483,6 +5483,22 @@ def command_bench(args: argparse.Namespace) -> int:
     return 2
 
 
+def command_diff(args: argparse.Namespace) -> int:
+    """Structural quality diff between two runs (distinct from `bench compare`)."""
+    from . import diff as diff_mod
+
+    if args.diff_command != "quality":
+        eprint(f"Unknown diff command: {args.diff_command}")
+        return 2
+    repo = Path(args.repo).resolve()
+    result = diff_mod.quality_diff(repo, args.old_run, args.new_run)
+    if args.format == "json":
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print(diff_mod.render_markdown(result))
+    return 0
+
+
 def command_validate(args: argparse.Namespace) -> int:
     repo = Path(args.repo).resolve()
     errors: list[str] = []
@@ -5909,6 +5925,14 @@ def build_parser() -> argparse.ArgumentParser:
     b_report = bench_sub.add_parser("report", help="Render a benchmark result as markdown")
     b_report.add_argument("--result", help="Result JSON path (default artifacts/bench/after.json)")
     b_report.set_defaults(func=command_bench)
+
+    p_diff = sub.add_parser("diff", help="Structural quality diff between two runs")
+    diff_sub = p_diff.add_subparsers(dest="diff_command", required=True)
+    d_quality = diff_sub.add_parser("quality", help="Compare two runs across 12 structural fields")
+    d_quality.add_argument("old_run")
+    d_quality.add_argument("new_run")
+    d_quality.add_argument("--format", choices=["json", "md"], default="md")
+    d_quality.set_defaults(func=command_diff)
 
     return parser
 
