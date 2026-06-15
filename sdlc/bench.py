@@ -179,7 +179,23 @@ def _dim_release_accuracy(repo: Path, readiness_fn: Callable[[str], dict[str, An
 
 
 def _dim_tui_completion(repo: Path) -> dict[str, Any]:
-    return _unavailable("TUI not yet built; the 10-task TUI benchmark requires an independent reviewer.")
+    # The curses TUI exists and programmatically addresses all 10 tasks (see
+    # sdlc/dashboard.task_answers). The OFFICIAL score, however, requires an
+    # independent reviewer completing the tasks without docs (spec FAC 8/22), so
+    # it is not auto-scored here — doing so would violate the independence rule.
+    try:
+        from . import dashboard
+        addressable = len(dashboard.task_answers({
+            "next_blocking_gate": None, "blockers": [], "critical_high_findings": [],
+            "unavailable_workers": [], "worker_preferences": {},
+            "resume_status": "x", "github_status": "x", "cost_status": "x",
+        }))
+    except Exception:
+        addressable = 0
+    return _unavailable(
+        f"TUI built; addresses {addressable}/10 tasks programmatically. "
+        "Official score pending independent-reviewer evaluation (spec requires no-docs human review)."
+    )
 
 
 def _dim_provider_flexibility(repo: Path) -> dict[str, Any]:

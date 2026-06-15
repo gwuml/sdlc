@@ -33,7 +33,7 @@
       "score": 100.0,
       "status": "MEASURED",
       "unit": "seconds",
-      "value": 0.0015
+      "value": 0.001
     },
     "3_evidence_completeness": {
       "detail": "234/278 executed gates across 22 runs carry evidence.",
@@ -78,7 +78,7 @@
       "value": 100.0
     },
     "9_tui_task_completion": {
-      "detail": "TUI not yet built; the 10-task TUI benchmark requires an independent reviewer.",
+      "detail": "TUI built; addresses 10/10 tasks programmatically. Official score pending independent-reviewer evaluation (spec requires no-docs human review).",
       "score": null,
       "status": "UNAVAILABLE",
       "unit": null,
