@@ -1,0 +1,28 @@
+[package]
+name = "sdlc"
+version = "0.1.0"
+edition = "2021"
+description = "Terminal-native, evidence-driven Secure SDLC orchestrator (Rust)"
+license = "Apache-2.0"
+# Pinned compiler lives in rust-toolchain.toml (reproducible builds, FAC 18).
+
+[[bin]]
+name = "sdlc"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+hmac = "0.12"
+
+[dev-dependencies]
+# Parity harness compares Rust output against `python -m sdlc` on every fixture.
+
+[profile.release]
+# Deterministic, reproducible release builds.
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

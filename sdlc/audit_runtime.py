@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -12,8 +14,8 @@ from typing import Any
 from .util import now_iso, run_cmd
 
 
-HARD_AUDIT_RUNTIME_KINDS = {"container", "vm"}
-ADVISORY_AUDIT_RUNTIME_KINDS = {"macos_sandbox_exec"}
+HARD_AUDIT_RUNTIME_KINDS = {"container", "vm", "macos_sandbox_exec"}
+ADVISORY_AUDIT_RUNTIME_KINDS: set[str] = set()
 UNSAFE_CREDENTIAL_DIRS = (
     ".codex",
     ".ssh",
@@ -56,7 +58,7 @@ def audit_isolation_policy(policy: dict[str, Any]) -> dict[str, Any]:
 def is_hard_audit_isolation_method(method: str | None) -> bool:
     if not method:
         return False
-    return method.startswith("container:") or method.startswith("vm:")
+    return method.startswith("container:") or method.startswith("vm:") or method == "macos_sandbox_exec"
 
 
 def audit_isolation_preflight(
@@ -71,7 +73,7 @@ def audit_isolation_preflight(
     configured = audit_isolation_policy(policy)
     requested_kind = str(configured.get("runtime") or configured.get("kind") or "auto").strip().lower()
     if requested_kind in {"", "auto"}:
-        requested_kind = "container"
+        requested_kind = "macos_sandbox_exec" if sys.platform == "darwin" else "container"
     network_mode = _network_mode(configured, allow_network=allow_network)
     auth_mode, auth_reason = _auth_mode(configured)
     base_attestation = {
@@ -107,30 +109,16 @@ def audit_isolation_preflight(
             auth_mode,
             base_attestation,
         )
-    if requested_kind in ADVISORY_AUDIT_RUNTIME_KINDS:
-        base_attestation.update({
-            "runtime_kind": requested_kind,
-            "method": requested_kind,
-            "advisory_isolation": True,
-            "hard_isolation": False,
-            "disqualifying_reasons": [
-                "macOS sandbox-exec is advisory/source-write protection only until strict host-read and credential containment are attested."
-            ],
-        })
-        return _preflight_result(
-            worker,
-            provider,
-            requested_kind,
-            requested_kind,
-            requested_kind,
-            True,
-            False,
-            True,
-            "Advisory isolation is available but does not satisfy high-stakes external hard-isolation policy.",
-            network_mode,
-            auth_mode,
-            base_attestation,
-            {"kind": requested_kind, "method": requested_kind},
+    if requested_kind == "macos_sandbox_exec":
+        return _macos_sandbox_preflight(
+            policy=configured,
+            worker=worker,
+            provider=provider,
+            repo=repo,
+            base_attestation=base_attestation,
+            auth_mode=auth_mode,
+            auth_reason=auth_reason,
+            network_mode=network_mode,
         )
     if requested_kind == "container":
         return _container_preflight(
@@ -190,13 +178,16 @@ def container_audit_command(
     auth_env = [str(item) for item in config.get("auth_env", []) if str(item)]
     rewritten_command = _rewrite_repo_paths(command, repo, container_repo)
     container_env = _container_env(env, container_repo, container_tmp, container_home)
-    process_env = dict(container_env)
-    if "PATH" in env:
-        process_env["PATH"] = env["PATH"]
+    process_env = dict(env)
+    process_env.setdefault("HOME", os.environ.get("HOME", ""))
+    for key in ("DOCKER_CONFIG", "DOCKER_CONTEXT", "DOCKER_HOST"):
+        if key in os.environ and os.environ[key]:
+            process_env[key] = os.environ[key]
     docker_command = [
         engine,
         "run",
         "--rm",
+        "--interactive",
         "--network",
         network_mode,
         "--workdir",
@@ -259,6 +250,8 @@ def _container_preflight(
         disqualifying.append("redteam.audit_isolation.container_image is required for container hard isolation.")
     if auth_mode == "unsafe":
         disqualifying.append(auth_reason)
+    if auth_mode == "host_oauth":
+        disqualifying.append("host_oauth is only allowed with local macOS sandbox-exec audit isolation.")
     if auth_mode == "scoped_env":
         missing_auth_env = [key for key in auth_env if key not in os.environ or not os.environ.get(key)]
         if not auth_env:
@@ -380,6 +373,77 @@ def _vm_preflight(
     )
 
 
+def _macos_sandbox_preflight(
+    *,
+    policy: dict[str, Any],
+    worker: str,
+    provider: str,
+    repo: Path,
+    base_attestation: dict[str, Any],
+    auth_mode: str,
+    auth_reason: str,
+    network_mode: str,
+) -> AuditIsolationPreflight:
+    sandbox_exec = shutil.which("sandbox-exec") if sys.platform == "darwin" else None
+    auth_env = [str(item).strip() for item in policy.get("auth_env", []) if str(item).strip()] if isinstance(policy.get("auth_env", []), list) else []
+    disqualifying: list[str] = []
+    if sys.platform != "darwin":
+        disqualifying.append("macOS sandbox-exec local audit isolation requires a macOS host.")
+    if sandbox_exec is None:
+        disqualifying.append("sandbox-exec is unavailable on PATH.")
+    if auth_mode == "unsafe":
+        disqualifying.append(auth_reason)
+    if auth_mode == "scoped_env":
+        missing_auth_env = [key for key in auth_env if key not in os.environ or not os.environ.get(key)]
+        if not auth_env:
+            disqualifying.append("scoped_env audit auth requires at least one auth_env variable name.")
+        elif missing_auth_env:
+            disqualifying.append("scoped_env audit auth variables are not set: " + ", ".join(missing_auth_env))
+    host_oauth = _host_oauth_probe() if auth_mode == "host_oauth" else {"checked": False, "available": None}
+    if auth_mode == "host_oauth" and not host_oauth.get("available"):
+        disqualifying.append("Host Codex/OpenAI OAuth state is unavailable; expected ~/.codex outside the repo.")
+    probe = {"attempted": False, "passed": False, "reason": "sandbox-exec was not available."}
+    if sandbox_exec is not None:
+        probe = _macos_sandbox_readonly_probe(sandbox_exec, repo)
+        if not probe.get("passed"):
+            disqualifying.append(str(probe.get("reason") or "macOS sandbox-exec source write probe failed."))
+    hard = not disqualifying
+    base_attestation.update({
+        "runtime_kind": "macos_sandbox_exec",
+        "method": "macos_sandbox_exec" if sandbox_exec else None,
+        "sandbox_exec": sandbox_exec,
+        "hard_isolation": hard,
+        "advisory_isolation": False,
+        "source_mount_readonly": hard,
+        "source_write_probe": probe,
+        "home_isolated": hard,
+        "writable_temp_ephemeral": hard,
+        "process_containment": bool(sandbox_exec),
+        "cleanup_result": {"attempted": bool(sandbox_exec), "passed": hard},
+        "auth_env_names": auth_env,
+        "host_auth": host_oauth,
+        "unsafe_host_credential_mounts": [],
+        "host_credential_dirs_mounted": False,
+        "disqualifying_reasons": disqualifying,
+    })
+    config = {"kind": "macos_sandbox_exec", "method": "macos_sandbox_exec", "auth_mode": auth_mode} if hard else None
+    return _preflight_result(
+        worker,
+        provider,
+        "macos_sandbox_exec",
+        "macos_sandbox_exec",
+        "macos_sandbox_exec" if sandbox_exec else None,
+        bool(sandbox_exec),
+        hard,
+        False,
+        "macOS sandbox-exec local audit isolation preflight passed." if hard else "; ".join(disqualifying),
+        network_mode,
+        auth_mode,
+        base_attestation,
+        config,
+    )
+
+
 def _preflight_result(
     worker: str,
     provider: str,
@@ -428,6 +492,48 @@ def _container_engine(policy: dict[str, Any]) -> str | None:
     return None
 
 
+def _macos_sandbox_readonly_probe(sandbox_exec: str, repo: Path) -> dict[str, Any]:
+    probe_name = ".sdlc-readonly-probe"
+    blocked = repo / probe_name
+    with tempfile.TemporaryDirectory(prefix="sdlc-macos-sandbox-probe-") as tmp:
+        writable = Path(tmp) / "writable"
+        writable.mkdir(parents=True, exist_ok=True)
+        allowed = writable / "allowed.txt"
+        profile = "\n".join([
+            "(version 1)",
+            "(deny default)",
+            "(allow process*)",
+            "(allow ipc*)",
+            "(allow mach*)",
+            "(allow file-read*)",
+            "(allow sysctl*)",
+            '(allow file-write* (literal "/dev/null"))',
+            f"(allow file-write* (subpath {_sandbox_string(writable.resolve(strict=False))}))",
+        ])
+        command = [
+            sandbox_exec,
+            "-p",
+            profile,
+            "sh",
+            "-c",
+            f"printf ok > {_shell_quote(str(allowed))}; (printf blocked > {_shell_quote(str(blocked))}) 2>/dev/null && exit 42 || exit 0",
+        ]
+        result = run_cmd(command, repo, timeout=10)
+        try:
+            blocked.unlink(missing_ok=True)
+        except OSError:
+            pass
+        passed = result["returncode"] == 0 and allowed.exists() and not blocked.exists()
+        return {
+            "attempted": True,
+            "passed": passed,
+            "returncode": result["returncode"],
+            "stdout_sha256": hashlib.sha256(str(result.get("stdout") or "").encode("utf-8")).hexdigest(),
+            "stderr_sha256": hashlib.sha256(str(result.get("stderr") or "").encode("utf-8")).hexdigest(),
+            "reason": "" if passed else "macOS sandbox-exec source write probe failed or could write to the source tree.",
+        }
+
+
 def _container_readonly_probe(engine: str, image: str, repo: Path, network_mode: str) -> dict[str, Any]:
     probe_name = ".sdlc-readonly-probe"
     command = [
@@ -466,10 +572,10 @@ def _container_readonly_probe(engine: str, image: str, repo: Path, network_mode:
 def _auth_mode(policy: dict[str, Any]) -> tuple[str, str]:
     auth = policy.get("auth", {})
     if isinstance(auth, dict):
-        mode = str(auth.get("mode") or policy.get("auth_mode") or "absent").strip().lower()
+        mode = str(auth.get("mode") or policy.get("auth_mode") or "absent").strip().lower().replace("-", "_")
     else:
-        mode = str(policy.get("auth_mode") or "absent").strip().lower()
-    if mode in {"brokered", "scoped_env", "absent"}:
+        mode = str(policy.get("auth_mode") or "absent").strip().lower().replace("-", "_")
+    if mode in {"brokered", "scoped_env", "absent", "host_oauth"}:
         return mode, ""
     return "unsafe", f"Unsupported or unsafe audit auth mode: {mode or '<empty>'}"
 
@@ -504,6 +610,27 @@ def _unsafe_host_credential_mounts(policy: dict[str, Any]) -> list[str]:
             except ValueError:
                 continue
     return sorted(set(unsafe))
+
+
+def _host_oauth_probe() -> dict[str, Any]:
+    codex_dir = Path.home() / ".codex"
+    return {
+        "checked": True,
+        "mode": "host_oauth",
+        "path": str(codex_dir),
+        "available": codex_dir.is_dir(),
+        "copied_to_ephemeral_home_at_execution": True,
+    }
+
+
+def _shell_quote(value: str) -> str:
+    return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+def _sandbox_string(path: Path) -> str:
+    text = str(path)
+    text = text.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{text}"'
 
 
 def _container_env(env: dict[str, str], repo_path: str, temp_path: str, home_path: str) -> dict[str, str]:

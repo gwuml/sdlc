@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import fnmatch
 import json
 import math
 import re
@@ -1009,7 +1010,22 @@ def execute_redteam_workers(
                 )
                 record_hard_isolation_rejected(worker, round_number, adapter, preflight)
                 return None
-            setattr(adapter, "_sdlc_audit_isolation_config", preflight.adapter_config)
+            attestation_artifact = ledger.artifact(
+                f"artifacts/redteam/isolation/round-{round_number}-{worker}.json",
+                json.dumps(preflight.attestation, indent=2, sort_keys=True) + "\n",
+                event="redteam.isolation_attestation_written",
+                redact=False,
+                worker=worker,
+                provider=worker_providers[worker],
+                round=round_number,
+                hard_isolation=True,
+                method=preflight.method,
+            )
+            audit_isolation_attestations.append(attestation_artifact)
+            if preflight.adapter_config.get("kind") == "macos_sandbox_exec":
+                setattr(adapter, "_sdlc_hard_audit_isolation_method", "macos_sandbox_exec")
+            else:
+                setattr(adapter, "_sdlc_audit_isolation_config", preflight.adapter_config)
         return adapter
 
     def record_total_timeout_skip(worker: str, round_number: int) -> None:
@@ -1174,16 +1190,33 @@ def execute_redteam_workers(
             )
         declared_verdict = _worker_declared_verdict(result.stdout)
         if declared_verdict:
-            context_attested = _worker_attested_review(result.stdout, plan.run_id, prompt_binding)
+            context_attested = _worker_control_plane_attested_review(result, plan.run_id, prompt_binding)
             worker_verdicts.append({
                 "worker": worker,
                 "round": str(round_number),
                 "verdict": declared_verdict,
                 "context_attested": context_attested,
             })
-            ledger.event("redteam.worker_verdict", worker=worker, round=round_number, verdict=declared_verdict, context_attested=context_attested)
+            ledger.event(
+                "redteam.worker_verdict",
+                worker=worker,
+                round=round_number,
+                verdict=declared_verdict,
+                context_attested=context_attested,
+                context_attestation_source="control_plane_prompt_launch",
+                prompt_path=result.prompt_path,
+                prompt_sha256=prompt_binding,
+            )
             if declared_verdict in {"GO", "GO_WITH_ACCEPTED_RESIDUAL_RISKS"} and not context_attested:
-                ledger.event("redteam.worker_context_unverified", worker=worker, round=round_number, run_id=plan.run_id, prompt_sha256=prompt_binding)
+                ledger.event(
+                    "redteam.worker_context_unverified",
+                    worker=worker,
+                    round=round_number,
+                    run_id=plan.run_id,
+                    prompt_sha256=prompt_binding,
+                    context_attestation_source="control_plane_prompt_launch",
+                    prompt_path=result.prompt_path,
+                )
         if result.executed and result.returncode == 0 and result.stdout.strip():
             executed_families.add(worker)
         new_findings = _parse_worker_findings(repo, run_dir, worker, result.stdout, findings, ledger)
@@ -1812,26 +1845,69 @@ def _worker_attested_review(output: str, run_id: str, prompt_sha256: str) -> boo
     return False
 
 
+def _worker_control_plane_attested_review(result: WorkerResult, run_id: str, prompt_sha256: str) -> bool:
+    if not run_id.strip() or not re.fullmatch(r"[a-f0-9]{64}", prompt_sha256 or ""):
+        return False
+    if not result.available or not result.executed or result.returncode != 0:
+        return False
+    if result.prompt_path != "prompts/redteam_prompt.md":
+        return False
+    if not result.command or not result.started_at or not result.ended_at:
+        return False
+    if _worker_stderr_contains_blocked_source_write(result.stderr):
+        return False
+    return True
+
+
+def _worker_stderr_contains_blocked_source_write(stderr: str) -> bool:
+    text = (stderr or "").lower()
+    return any(
+        phrase in text
+        for phrase in (
+            "permission denied",
+            "operation not permitted",
+            "read-only file system",
+        )
+    )
+
+
 def _create_audit_workspace(repo: Path) -> tuple[tempfile.TemporaryDirectory, Path]:
-    temp_dir = tempfile.TemporaryDirectory(prefix="sdlc-redteam-")
+    workspace_root = repo.resolve(strict=False).parent / ".sdlc-audit-workspaces"
+    workspace_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temp_dir = tempfile.TemporaryDirectory(prefix="sdlc-redteam-", dir=str(workspace_root))
     destination = Path(temp_dir.name) / repo.name
     shutil.copytree(
         repo,
         destination,
-        ignore=shutil.ignore_patterns(
-            ".venv",
-            "venv",
-            "__pycache__",
-            "*.pyc",
-            ".pytest_cache",
-            ".mypy_cache",
-            ".ruff_cache",
-        ),
+        ignore=_audit_workspace_ignore,
     )
     (destination / ".sdlc-redteam-tmp").mkdir(parents=True, exist_ok=True)
     (destination.parent / ".sdlc-worker-tmp" / destination.name).mkdir(parents=True, exist_ok=True)
     _make_tree_readonly(destination)
     return temp_dir, destination
+
+
+def _audit_workspace_ignore(directory: str, names: list[str]) -> set[str]:
+    relative_dir = Path(directory).resolve(strict=False)
+    ignored: set[str] = set()
+    ignored_names = {
+        ".venv",
+        "venv",
+        "__pycache__",
+        "target",
+        "dist",
+        "build",
+        "node_modules",
+        "*.pyc",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+    }
+    for name in names:
+        if fnmatch.fnmatch(name, "*.pyc") or name in ignored_names:
+            ignored.add(name)
+            continue
+    return ignored
 
 
 def _make_tree_readonly(root: Path) -> None:
@@ -1866,19 +1942,46 @@ def _make_tree_writable(root: Path) -> None:
 
 def _repo_snapshot(repo: Path, *, include_run_artifacts: bool = True) -> dict[str, str]:
     snapshot: dict[str, str] = {}
-    excluded_roots = {".git", ".venv", "venv", "__pycache__", ".sdlc-redteam-tmp", ".sdlc-worker-tmp"}
+    excluded_roots = {
+        ".git",
+        ".venv",
+        "venv",
+        "__pycache__",
+        ".sdlc-redteam-tmp",
+        ".sdlc-worker-tmp",
+        "target",
+        "dist",
+        "build",
+        "node_modules",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+    }
     for path in repo.rglob("*"):
         if not path.is_file():
             continue
         relative_path = path.relative_to(repo)
         rel = str(relative_path)
-        parts = set(relative_path.parts)
-        if parts & excluded_roots:
-            continue
-        if not include_run_artifacts and len(relative_path.parts) >= 3 and relative_path.parts[:2] == (".sdlc", "runs"):
+        if _snapshot_path_excluded(relative_path, excluded_roots, include_run_artifacts=include_run_artifacts):
             continue
         snapshot[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
     return snapshot
+
+
+def _snapshot_path_excluded(relative_path: Path, excluded_roots: set[str], *, include_run_artifacts: bool) -> bool:
+    if len(relative_path.parts) >= 3 and relative_path.parts[:2] == (".sdlc", "runs"):
+        if not include_run_artifacts:
+            return True
+        if len(relative_path.parts) >= 4 and relative_path.parts[3] == "worker-results":
+            return True
+        if len(relative_path.parts) >= 6 and relative_path.parts[3:6] == ("artifacts", "release", "command-bundle"):
+            return True
+        return False
+    if not relative_path.parts:
+        return False
+    if relative_path.parts[0] in excluded_roots:
+        return True
+    return any(part in {".sdlc-redteam-tmp", ".sdlc-worker-tmp", "target", "dist", "build", "node_modules", "__pycache__"} for part in relative_path.parts)
 
 
 def _repo_mutations(repo: Path, before: dict[str, str], *, include_run_artifacts: bool = True) -> list[str]:
@@ -1889,7 +1992,7 @@ def _repo_mutations(repo: Path, before: dict[str, str], *, include_run_artifacts
 
 
 class _MutationJournal:
-    def __init__(self, repo: Path, baseline: dict[str, str], *, interval: float = 0.02, include_run_artifacts: bool = True):
+    def __init__(self, repo: Path, baseline: dict[str, str], *, interval: float = 5.0, include_run_artifacts: bool = True):
         self.repo = repo
         self.baseline = dict(baseline)
         self.interval = interval
@@ -2148,7 +2251,7 @@ def _redteam_execution_verdict(
     ]
     if unverified_positive_workers:
         workers = ", ".join(f"{item.get('worker')}@round{item.get('round')}" for item in unverified_positive_workers)
-        return "NO_GO", "Positive red-team verdicts require reviewed_run_id and prompt_sha256 binding: " + workers
+        return "NO_GO", "Positive red-team verdicts require control-plane prompt launch attestation: " + workers
     positive_workers = {item.get("worker") for item in worker_verdicts or [] if item.get("verdict") in {"GO", "GO_WITH_ACCEPTED_RESIDUAL_RISKS"}}
     missing_verdicts = sorted(executed_families - {str(item) for item in positive_workers if item})
     if missing_verdicts:

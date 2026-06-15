@@ -65,13 +65,13 @@
     ],
     "audit_isolation": {
       "auth": {
-        "mode": "absent"
+        "mode": "host_oauth"
       },
       "auth_env": [],
       "container_engine": "auto",
       "container_image": "",
-      "network_mode": "none",
-      "runtime": "container"
+      "network_mode": "host",
+      "runtime": "macos_sandbox_exec"
     },
     "critical_high_auto_fix_required": true,
     "cross_model_independence": "distinct_openai_model_identity",

@@ -7,20 +7,41 @@ from pathlib import Path
 from .engine import RunStore, final_verdict
 from .ledger import Ledger
 from .models import open_findings
+from .policies import load_policy
 from .util import read_json
+
+
+def release_contract_verdict(policy: dict[str, object], internal_verdict: str, *, release_satisfied: bool) -> str:
+    contract = policy.get("release_verdict_contract")
+    if not isinstance(contract, dict):
+        return internal_verdict if release_satisfied else "NO_GO"
+    blocked = str(contract.get("blocked") or "NO_GO").strip() or "NO_GO"
+    positive = str(contract.get("positive") or internal_verdict).strip() or internal_verdict
+    allowed = contract.get("allowed")
+    if not release_satisfied:
+        token = blocked
+    else:
+        token = positive
+    if isinstance(allowed, list):
+        allowed_tokens = {str(item) for item in allowed}
+        if token not in allowed_tokens:
+            return blocked
+    return token
 
 
 def build_report(repo: Path, run_id: str, *, verdict_override: str | None = None, readiness_errors: list[str] | None = None) -> str:
     store = RunStore(repo)
     plan = store.load_plan(run_id)
     findings = store.load_findings(run_id)
+    policy = load_policy(repo, plan.policy_profile)
     computed_verdict = final_verdict(findings, plan)
-    verdict = verdict_override or computed_verdict
+    internal_verdict = verdict_override or computed_verdict
     release_blockers = list(readiness_errors or [])
-    if verdict == "NO_GO" and not any("Local final verdict is NO_GO" in item for item in release_blockers):
+    if internal_verdict == "NO_GO" and not any("Local final verdict is NO_GO" in item for item in release_blockers):
         release_blockers.insert(0, "Local final verdict is NO_GO; release gates are not satisfied.")
-    release_satisfied = verdict != "NO_GO" and not release_blockers
-    release_verdict = verdict if release_satisfied else "NO_GO"
+    release_satisfied = internal_verdict != "NO_GO" and not release_blockers
+    verdict = release_contract_verdict(policy, internal_verdict, release_satisfied=release_satisfied)
+    release_verdict = verdict
     authority_mode = "RELEASE_CANDIDATE_ADVISORY" if release_satisfied else "ADVISORY"
     blocking_gates = [
         gate
@@ -66,6 +87,7 @@ This report only claims that recorded gates and evidence exist. It does **not** 
 
 ## Release Readiness
 - Local final verdict: {computed_verdict}
+- Contract verdict: {verdict}
 - Release verdict: {release_verdict}
 - Release satisfied: {str(release_satisfied).lower()}
 - Readiness blockers: {len(release_blockers)}
@@ -117,8 +139,17 @@ This report only claims that recorded gates and evidence exist. It does **not** 
 
 def generate_report(repo: Path, run_id: str, *, verdict_override: str | None = None, readiness_errors: list[str] | None = None) -> str:
     store = RunStore(repo)
+    plan = store.load_plan(run_id)
     report = build_report(repo, run_id, verdict_override=verdict_override, readiness_errors=readiness_errors)
-    event_verdict = verdict_override or final_verdict(store.load_findings(run_id), store.load_plan(run_id))
+    internal_verdict = verdict_override or final_verdict(store.load_findings(run_id), plan)
+    release_blockers = list(readiness_errors or [])
+    if internal_verdict == "NO_GO" and not any("Local final verdict is NO_GO" in item for item in release_blockers):
+        release_blockers.insert(0, "Local final verdict is NO_GO; release gates are not satisfied.")
+    event_verdict = release_contract_verdict(
+        load_policy(repo, plan.policy_profile),
+        internal_verdict,
+        release_satisfied=internal_verdict != "NO_GO" and not release_blockers,
+    )
     Ledger(store.run_dir(run_id), run_id).artifact(
         "final-report.md",
         report,

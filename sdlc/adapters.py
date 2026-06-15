@@ -56,6 +56,10 @@ def _worker_extra_read_dirs(adapter: object) -> list[Path]:
     return dirs
 
 
+def _control_plane_pythonpath() -> str:
+    return str(Path(__file__).resolve().parents[1])
+
+
 @dataclass
 class WorkerResult:
     worker: str
@@ -126,6 +130,13 @@ class WorkerResult:
             data["stdout_path"] = self.stdout_path
         if self.stderr_path is not None:
             data["stderr_path"] = self.stderr_path
+        # Always surface cost/token usage for executed runs — real figures when the
+        # worker reported them, explicit UNAVAILABLE otherwise. Never silently omit.
+        from .usage import extract_usage
+        if self.executed:
+            data["usage"] = extract_usage(self.stdout)
+        else:
+            data["usage"] = {"status": "UNAVAILABLE", "reason": "worker not executed (dry-run or unavailable)"}
         return data
 
 
@@ -154,6 +165,8 @@ class WorkerAdapter:
             "TMPDIR": str(temp_dir),
             "TMP": str(temp_dir),
             "TEMP": str(temp_dir),
+            "PYTHONPATH": _control_plane_pythonpath(),
+            "SDLC_CONTROL_PLANE_PYTHONPATH": _control_plane_pythonpath(),
             "PYTHONDONTWRITEBYTECODE": "1",
             "SDLC_WORKER_SANITIZED_ENV": "1",
         })
@@ -215,6 +228,8 @@ class WorkerAdapter:
             env["TMP"] = str(temp_dir)
             env["TEMP"] = str(temp_dir)
             env["HOME"] = str(hard_home)
+            env["CARGO_TARGET_DIR"] = str(temp_dir / "cargo-target")
+            env["SDLC_AUDIT_WRITABLE_DIR"] = str(temp_dir)
             try:
                 run_command = _macos_sandbox_exec_command(
                     _external_hard_sandbox_command(command),
@@ -243,9 +258,10 @@ class WorkerAdapter:
             kind = str(audit_runtime_config.get("kind") or "").strip().lower()
             if kind == "container":
                 try:
+                    container_command = _external_hard_sandbox_command(run_command)
                     run_command, env, runtime_attestation = container_audit_command(
                         config=audit_runtime_config,
-                        command=run_command,
+                        command=container_command,
                         repo=repo,
                         env=env,
                     )
@@ -532,28 +548,32 @@ def _macos_sensitive_read_deny_paths(hard_home: Path | None = None) -> list[Path
     home = Path(os.environ.get("HOME", "")).expanduser()
     if not home.is_absolute():
         return []
-    candidates = [home]
+    candidates = [
+        home / ".ssh",
+        home / ".aws",
+        home / ".gcp",
+        home / ".azure",
+        home / ".kube",
+        home / ".docker",
+        home / ".gnupg",
+        home / ".codex",
+        home / ".config" / "gh",
+        home / ".config" / "gcloud",
+        home / ".netrc",
+        home / "Library" / "Application Support" / "Codex",
+        home / "Library" / "Caches" / "Codex",
+        home / "Library" / "Logs" / "Codex",
+        home / "Desktop",
+        home / "Documents",
+        home / "Downloads",
+    ]
     if hard_home:
-        try:
-            hard_home.resolve(strict=False).relative_to(home.resolve(strict=False))
-        except ValueError:
-            pass
-        else:
-            candidates = [
-                home / ".ssh",
-                home / ".aws",
-                home / ".gcp",
-                home / ".azure",
-                home / ".kube",
-                home / ".docker",
-                home / ".gnupg",
-                home / ".config" / "gh",
-                home / ".config" / "gcloud",
-                home / ".netrc",
-                home / "Desktop",
-                home / "Documents",
-                home / "Downloads",
-            ]
+        hard_home_resolved = hard_home.resolve(strict=False)
+        candidates = [
+            path
+            for path in candidates
+            if not _paths_overlap(path.resolve(strict=False), hard_home_resolved)
+        ]
     return [path for path in candidates if path.exists()]
 
 
@@ -635,6 +655,107 @@ def _unique_capture_dir(run_dir: Path, worker: str, mode: str, *, label: str | N
     return candidate
 
 
+def _unique_external_capture_dir(run_dir: Path, worker: str, mode: str, *, label: str | None = None) -> Path:
+    repo = run_dir.parents[2]
+    external_root = Path(os.environ.get("SDLC_EXTERNAL_EVIDENCE_ROOT", repo.parent / ".sdlc-external-evidence"))
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    safe_label = f"{label}-" if label else ""
+    base = external_root / run_dir.name / "worker-results" / f"{stamp}-{safe_label}{worker}-{mode.lower()}"
+    candidate = base
+    suffix = 2
+    while candidate.exists():
+        candidate = external_root / run_dir.name / "worker-results" / f"{stamp}-{safe_label}{worker}-{mode.lower()}-{suffix}"
+        suffix += 1
+    return candidate
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _capture_redteam_result_external(
+    *,
+    run_dir: Path,
+    mode: str,
+    prompt_path: Path,
+    result: WorkerResult,
+    ledger: Ledger,
+    label: str | None = None,
+) -> dict[str, Any]:
+    capture_dir = _unique_external_capture_dir(run_dir, result.worker, mode, label=label)
+    capture_dir.mkdir(parents=True, exist_ok=False)
+    stdout_path = capture_dir / "stdout.txt"
+    stderr_path = capture_dir / "stderr.txt"
+    external_result_path = capture_dir / "result.json"
+
+    stdout_text = redact_secrets(result.stdout)
+    stderr_text = redact_secrets(result.stderr)
+    result.mode = mode
+    result.prompt_path = _relative_to_run(run_dir, prompt_path)
+    result.output_dir = str(capture_dir)
+    result.stdout_path = str(stdout_path)
+    result.stderr_path = str(stderr_path)
+
+    stdout_path.write_text(stdout_text, encoding="utf-8")
+    stderr_path.write_text(stderr_text, encoding="utf-8")
+    result_dict = _redacted_result_dict(result)
+    external_result_path.write_text(json.dumps(result_dict, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    manifest_rel = f"artifacts/redteam/worker-captures/{capture_dir.name}/capture.json"
+    manifest = {
+        "schema_version": 1,
+        "externalized": True,
+        "worker": result.worker,
+        "mode": mode,
+        "prompt_path": result.prompt_path,
+        "external_output_dir": str(capture_dir),
+        "stdout_path": str(stdout_path),
+        "stderr_path": str(stderr_path),
+        "external_result_path": str(external_result_path),
+        "stdout_sha256": _sha256_text(stdout_text),
+        "stderr_sha256": _sha256_text(stderr_text),
+        "result_sha256": hashlib.sha256(external_result_path.read_bytes()).hexdigest(),
+        "stdout_bytes": len(stdout_text.encode("utf-8")),
+        "stderr_bytes": len(stderr_text.encode("utf-8")),
+        "returncode": result.returncode,
+        "executed": result.executed,
+        "available": result.available,
+        "timed_out": result.timed_out,
+        "stdout_truncated": result.stdout_truncated,
+        "stderr_truncated": result.stderr_truncated,
+    }
+    result.result_path = manifest_rel
+    ledger.artifact(
+        manifest_rel,
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        event="worker.output_externalized",
+        redact=False,
+        worker=result.worker,
+        mode=mode,
+        stream="manifest",
+        stdout_sha256=manifest["stdout_sha256"],
+        stderr_sha256=manifest["stderr_sha256"],
+        result_sha256=manifest["result_sha256"],
+    )
+    ledger.event(
+        "worker.completed",
+        worker=result.worker,
+        mode=mode,
+        executed=result.executed,
+        available=result.available,
+        returncode=result.returncode,
+        output_dir=result.output_dir,
+        result=result.result_path,
+        stdout=result.stdout_path,
+        stderr=result.stderr_path,
+        externalized=True,
+    )
+    captured = result.to_dict()
+    captured["external_result_path"] = str(external_result_path)
+    captured["external_capture_manifest"] = manifest_rel
+    return captured
+
+
 def capture_worker_result(
     *,
     run_dir: Path,
@@ -645,6 +766,15 @@ def capture_worker_result(
     label: str | None = None,
 ) -> dict[str, Any]:
     """Persist worker stdout/stderr and metadata as run evidence."""
+    if mode.startswith("REDTEAM_ROUND_") and result.executed:
+        return _capture_redteam_result_external(
+            run_dir=run_dir,
+            mode=mode,
+            prompt_path=prompt_path,
+            result=result,
+            ledger=ledger,
+            label=label,
+        )
     capture_dir = _unique_capture_dir(run_dir, result.worker, mode, label=label)
     stdout_rel = _relative_to_run(run_dir, capture_dir / "stdout.txt")
     stderr_rel = _relative_to_run(run_dir, capture_dir / "stderr.txt")
@@ -807,6 +937,28 @@ class KimiAdapter(WorkerAdapter):
         return ["kimi", "--prompt", "-"]
 
 
+class OllamaAdapter(WorkerAdapter):
+    """Open / local LLMs via Ollama. Runs fully on-machine — no API key, no network
+    egress — so it is the default path for air-gapped or zero-cost workers. The model
+    is configurable via SDLC_OLLAMA_MODEL (default 'llama3')."""
+
+    name = "ollama"
+    provider = "ollama-local"
+
+    def __init__(self, model: str | None = None):
+        self.model = model or os.environ.get("SDLC_OLLAMA_MODEL", "llama3")
+
+    def build_stdin(self, prompt_path: Path, repo: Path, mode: str) -> str | None:
+        return prompt_path.read_text(encoding="utf-8") if prompt_path.exists() else ""
+
+    def build_command(self, prompt_path: Path, repo: Path, mode: str) -> list[str]:
+        # Prompt is delivered on stdin (never in argv); `ollama run <model>` reads it.
+        return ["ollama", "run", self.model]
+
+    def security_review_write_protected(self, policy: dict[str, Any] | None = None) -> bool:
+        return True
+
+
 class LocalCommandAdapter(WorkerAdapter):
     def __init__(self, name: str, command: list[str], *, security_review_protected: bool = False, provider: str = "local"):
         self.name = name
@@ -829,7 +981,39 @@ ADAPTERS: dict[str, WorkerAdapter] = {
     "claude": ClaudeAdapter(),
     "gemini": GeminiAdapter(),
     "kimi": KimiAdapter(),
+    "ollama": OllamaAdapter(),
 }
+
+
+def select_available_adapter(
+    preferences: list[str],
+    policy: dict[str, Any] | None = None,
+    *,
+    repo: Path | None = None,
+    mode: str = "PLAN",
+) -> dict[str, Any]:
+    """Fallback chain: return the first preferred worker family whose CLI is actually
+    available, trying each in order. If none are available, return an explicit
+    WORKER_UNAVAILABLE result listing what was tried — never silently skip.
+
+    Result: {"name", "adapter", "tried": [(name, reason)], "status"}.
+    """
+    repo = repo or Path(".")
+    tried: list[tuple[str, str]] = []
+    for name in preferences:
+        adapter = adapter_from_policy(name, policy) or ADAPTERS.get(name)
+        if adapter is None:
+            tried.append((name, "unknown-adapter"))
+            continue
+        try:
+            command = adapter.build_command(Path("prompt.md"), repo, mode)
+        except Exception:  # noqa: BLE001
+            tried.append((name, "no-command"))
+            continue
+        if command and shutil.which(command[0]):
+            return {"name": name, "adapter": adapter, "tried": tried, "status": "AVAILABLE"}
+        tried.append((name, f"unavailable:{command[0] if command else '?'}"))
+    return {"name": None, "adapter": None, "tried": tried, "status": "WORKER_UNAVAILABLE"}
 
 
 def adapter_from_policy(name: str, policy: dict[str, Any] | None = None) -> WorkerAdapter | None:

@@ -1,0 +1,29 @@
+{
+  "schema": "sdlc.bench.baseline/v1",
+  "recorded_at": "2026-06-14T00:00:00Z",
+  "git_commit": "10ce71282ea3660fd0e54d2fc4d73813a1466fcc",
+  "reference_implementation": "python -m sdlc",
+  "note": "Pre-migration baseline. Dimensions without measurement tooling in the Python reference are recorded as UNAVAILABLE rather than fabricated. The Rust migration must improve or match these and record after.json with measured values.",
+  "dimensions": {
+    "1_setup_friction_seconds": "UNAVAILABLE — no setup-friction harness in Python reference",
+    "2_blocker_visibility_seconds": "UNAVAILABLE — not instrumented",
+    "3_evidence_completeness_pct": "UNAVAILABLE — no per-run completeness scorer",
+    "4_hallucination_count": "UNAVAILABLE — no automated unsupported-claim counter",
+    "5_redteam_independence_pct": "UNAVAILABLE — not scored as a dimension",
+    "6_resume_recovery_pct": "UNAVAILABLE — resume not implemented in reference",
+    "7_failed_tool_visibility_pct": "UNAVAILABLE — not scored as a dimension",
+    "8_release_readiness_accuracy_pct": "UNAVAILABLE — not scored as a dimension",
+    "9_tui_task_completion_pct": "UNAVAILABLE — reference TUI is a plain status dump",
+    "10_provider_flexibility_count": "UNAVAILABLE — provider abstraction not scored",
+    "11_cost_token_visibility_pct": "UNAVAILABLE — cost/token not tracked",
+    "12_github_pr_provenance_pct": "UNAVAILABLE — not scored as a dimension"
+  },
+  "reference_facts": {
+    "python_modules": 22,
+    "python_loc": 16385,
+    "cli_subcommands": 24,
+    "sdlc_run_fixtures": 23,
+    "reference_run_release_verdict": "NO_GO (production-grade-release-blockers: gate evidence + finding-closure conformance outstanding)"
+  },
+  "test_suite": "NOT RUN — operator declined the test-suite run during Phase 0; recorded honestly rather than fabricated"
+}

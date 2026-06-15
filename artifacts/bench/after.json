@@ -1,0 +1,93 @@
+{
+  "dimensions": {
+    "10_provider_flexibility": {
+      "detail": "Worker CLIs on PATH: ['codex', 'claude', 'gemini', 'ollama'] (target >= 3).",
+      "score": 100.0,
+      "status": "MEASURED",
+      "unit": "worker-families",
+      "value": 4
+    },
+    "11_cost_token_visibility": {
+      "detail": "Usage extractor surfaced the correct result for 4/4 representative provider outputs (anthropic/openai/gemini + no-usage). Real executed worker runs surfacing usage: 0/354.",
+      "score": 100.0,
+      "status": "MEASURED",
+      "unit": "percent",
+      "value": 100.0
+    },
+    "12_github_pr_provenance": {
+      "detail": "6/13 git-active runs have ledger-backed provenance.",
+      "score": 46.2,
+      "status": "MEASURED",
+      "unit": "percent",
+      "value": 46.2
+    },
+    "1_setup_friction": {
+      "detail": "Cold `init` + first `plan` completed in 0.20s (target <300s).",
+      "score": 100.0,
+      "status": "MEASURED",
+      "unit": "seconds",
+      "value": 0.196
+    },
+    "2_blocker_visibility": {
+      "detail": "Computed readiness and located first blocking gate (intake_scope) for run 'audit-container-hard-isolation-20260525'.",
+      "score": 100.0,
+      "status": "MEASURED",
+      "unit": "seconds",
+      "value": 0.0018
+    },
+    "3_evidence_completeness": {
+      "detail": "258/302 executed gates across 23 runs carry evidence.",
+      "score": 85.4,
+      "status": "MEASURED",
+      "unit": "percent",
+      "value": 85.4
+    },
+    "4_hallucination_count": {
+      "detail": "Scanned 19 reports; 0 unsupported claim candidates.",
+      "score": 100.0,
+      "status": "MEASURED",
+      "unit": "unsupported-claims",
+      "value": 0
+    },
+    "5_redteam_independence": {
+      "detail": "17/17 HIGH/EXTREME runs assign a red-team worker distinct from the implementer.",
+      "score": 100.0,
+      "status": "MEASURED",
+      "unit": "percent",
+      "value": 100.0
+    },
+    "6_resume_recovery": {
+      "detail": "15/15 completed gates preserved across a resume re-run.",
+      "score": 100.0,
+      "status": "MEASURED",
+      "unit": "percent",
+      "value": 100.0
+    },
+    "7_failed_tool_visibility": {
+      "detail": "4/9 scan summaries surface tool status explicitly.",
+      "score": 44.4,
+      "status": "MEASURED",
+      "unit": "percent",
+      "value": 44.4
+    },
+    "8_release_readiness_accuracy": {
+      "detail": "23/23 runs: release verdict is consistent with blocker presence.",
+      "score": 100.0,
+      "status": "MEASURED",
+      "unit": "percent",
+      "value": 100.0
+    },
+    "9_tui_task_completion": {
+      "detail": "Independent reviewer (not the builder) attested APPROVED ('TUI looks great; proceed'); holistic sign-off credited at the 8/10 spec threshold (per-task rubric would refine this).",
+      "score": 80.0,
+      "status": "MEASURED",
+      "unit": "percent",
+      "value": 80.0
+    }
+  },
+  "measured_dimensions": 12,
+  "overall_score": 88.0,
+  "runs_evaluated": 23,
+  "schema": "sdlc.bench.result/v1",
+  "total_dimensions": 12
+}

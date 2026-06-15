@@ -1,0 +1,127 @@
+# Release workflow — the ONLY authorized path to produce release assets (FAC 9, 17).
+#
+# Releases the Python distribution (the current shippable deliverable), signed with
+# Sigstore keyless cosign (no stored key), with a CycloneDX SBOM and checksums.
+# A future Rust cross-build job is stubbed below (disabled) until the binary lands.
+name: release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: write   # create GitHub Releases / upload assets
+  id-token: write   # Sigstore keyless OIDC signing (no stored private key)
+
+jobs:
+  guard:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Verify release ref (releases only from main or v* tags)
+        run: |
+          case "${GITHUB_REF}" in
+            refs/heads/main|refs/tags/v*) echo "authorized release ref: ${GITHUB_REF}" ;;
+            *) echo "::error::releases may only be cut from main or v* tags"; exit 1 ;;
+          esac
+
+  build-sign:
+    needs: guard
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build sdist + wheel
+        run: |
+          python -m pip install --upgrade pip build cyclonedx-bom
+          python -m build --outdir dist
+
+      - name: Generate SBOM (CycloneDX) and verify completeness
+        run: |
+          # Resolved SBOM from the built environment.
+          cyclonedx-py environment --output-format JSON --outfile sbom.cdx.json || \
+            python scripts/gen_sbom.py sbom.cdx.json
+          # Content-equality check: every declared dependency must appear in the SBOM
+          # (not a count-only check). Fails the build on any missing package.
+          python - <<'PY'
+          import json, re, sys, pathlib
+          sbom = json.loads(pathlib.Path("sbom.cdx.json").read_text())
+          names = {c.get("name","").lower() for c in sbom.get("components", [])}
+          deps = re.findall(r'"([A-Za-z0-9_.\-]+)[^"]*"',
+                            re.search(r"dependencies\s*=\s*\[(.*?)\]",
+                                      pathlib.Path("pyproject.toml").read_text(), re.DOTALL).group(1))
+          missing = [d for d in deps if d.lower() not in names]
+          if missing:
+              print(f"::error::SBOM missing declared dependencies: {missing}"); sys.exit(1)
+          print(f"SBOM completeness OK: {len(deps)} declared deps all present")
+          PY
+
+      - name: Checksums
+        run: |
+          ( cd dist && sha256sum * ) > SHA256SUMS
+          sha256sum sbom.cdx.json >> SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign SHA256SUMS (Sigstore keyless — logged to Rekor)
+        run: |
+          cosign sign-blob --yes \
+            --output-signature SHA256SUMS.sig \
+            --output-certificate SHA256SUMS.pem \
+            SHA256SUMS
+
+      - name: Upload release assets (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*
+            sbom.cdx.json
+            SHA256SUMS
+            SHA256SUMS.sig
+            SHA256SUMS.pem
+
+      - name: Upload build artifacts (non-tag runs)
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-bundle
+          path: |
+            dist/*
+            sbom.cdx.json
+            SHA256SUMS
+            SHA256SUMS.sig
+            SHA256SUMS.pem
+
+  hundred-x-claim-gate:
+    needs: guard
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fail on unsupported "100x" claims in the benchmark report (FAC 20)
+        run: |
+          report="artifacts/bench/report.md"
+          if [ -f "$report" ] && grep -Eiq '100x' "$report"; then
+            if ! grep -q "100x superiority was not proven" "$report" \
+               && ! grep -Eq 'measured .*100x.*before.*after' "$report"; then
+              echo "::error::unsupported 100x claim without benchmark evidence"; exit 1
+            fi
+          fi
+          echo "100x-claim gate passed"
+
+  # FUTURE (Phase 6, disabled): signed reproducible cross-platform Rust binary.
+  # Enable when the Rust binary reaches command parity. Pins runners ubuntu-22.04 /
+  # macos-14, verifies rust-toolchain.toml, double-builds for byte-identical SHA256SUMS,
+  # codesigns+notarizes macOS (needs Apple cert via secrets).
+  rust-binary:
+    if: false
+    needs: guard
+    runs-on: ubuntu-22.04
+    steps:
+      - run: echo "Rust cross-build + notarization — implemented in Phase 6"

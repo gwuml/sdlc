@@ -67,6 +67,7 @@ Verify the install:
 ```bash
 python -m sdlc --help
 python -m sdlc validate
+python -m sdlc release doctor --json
 python -m sdlc validate --run-id <run-id> --release
 ```
 
@@ -116,6 +117,17 @@ exact merge, PR, and cleanup commands still required. Do not merge stale,
 failed, unrelated, or abandoned branches as part of housekeeping.
 
 By default, worker commands are **dry-run only**. Use `--execute` explicitly if you want the adapter to call Codex or Claude.
+For HIGH/EXTREME executed prompt runs, SDLC now runs a release preflight before
+calling the worker. The preflight blocks recurring late failures early: dirty
+worktrees, protected branches, missing attestation/actor-proof keys, scanner
+policy mismatches, and missing local red-team sandbox/OAuth prerequisites. Use:
+
+```bash
+python -m sdlc release doctor <run-id> --json
+```
+
+to see the exact prerequisites and fixes before starting expensive release-lane
+work.
 The local `run` command now performs a full advisory pass: it creates
 architecture/dev/QA/red-team gate artifacts without external workers, runs
 available deterministic local checks, and marks unsupported implementation or
@@ -324,3 +336,11 @@ Still to build:
 ```bash
 python -m unittest discover -s tests
 ```
+
+## Privacy
+
+The control plane is local-first and transmits nothing off-machine by default. For
+exactly what data is handled, what leaves the machine only with explicit consent, how
+consent is recorded and revoked, and what the local memory store retains, see
+[privacy.md](privacy.md).
+
