@@ -31,7 +31,7 @@ from .pipeline import DEFAULT_GATES, gates_as_dicts
 from .policies import ensure_policy_files, load_policy
 from .prompts import redteam_prompt_binding_sha256, write_prompt_bundle
 from .release import release_preflight, release_preflight_error
-from .reporting import build_report, generate_report
+from .reporting import build_report, generate_report, release_contract_verdict
 from .scanners import run_security_scans, scan_notes, scan_verdict
 from .util import git_current_branch, is_git_repo, now_iso, read_json, relpath_under_base, resolve_repo_paths, resolve_under_base, run_cmd, slugify, write_json
 from .validation import validate_json_schema
@@ -140,6 +140,7 @@ CANONICAL_ARTIFACT_EVENTS = {
     "finding.remediation_diff",
     "finding.remediation_summary",
     "finding.remediation_validation",
+    "finding.actor_proof",
     "finding.risk_acceptance",
     "gate.evidence_recorded",
     "gate.required_artifact_recorded",
@@ -147,13 +148,16 @@ CANONICAL_ARTIFACT_EVENTS = {
     "gate.source_evidence_recorded",
     "git.provenance_artifact",
     "redteam.findings_parsed",
+    "release.command_bundle_recorded",
     "security.scans_completed",
     "worker.output_captured",
+    "worker.output_externalized",
 }
 FINDING_CLOSURE_ARTIFACT_EVENTS = {
     "finding.remediation_diff",
     "finding.remediation_summary",
     "finding.remediation_validation",
+    "finding.actor_proof",
     "finding.risk_acceptance",
     "gate.residual_risk_acceptance",
     "remediation.diff_artifact",
@@ -446,7 +450,14 @@ def _validate_final_report_gate_completion(store: RunStore, run_id: str, gate: G
         return "Verified manifest does not cover the current final-report control snapshot"
     if not any(isinstance(item, dict) and item.get("path") == "artifacts/attestations/control-snapshots/release-readiness.json" and item.get("sha256") == readiness_snapshot_sha for item in manifest_entries):
         return "Verified manifest does not cover the current release-readiness control snapshot"
-    expected_release_verdict = final_verdict(store.load_findings(run_id), store.load_plan(run_id))
+    plan = store.load_plan(run_id)
+    expected_internal_verdict = final_verdict(store.load_findings(run_id), plan)
+    policy = load_policy(store.repo, plan.policy_profile)
+    expected_release_verdict = release_contract_verdict(
+        policy,
+        expected_internal_verdict,
+        release_satisfied=readiness_payload.get("release_satisfied") is True,
+    )
     if readiness_payload.get("release_verdict") != expected_release_verdict:
         return (
             "Final report readiness evidence release_verdict does not match current final verdict: "
@@ -556,11 +567,13 @@ def _validate_non_placeholder_evidence(repo: Path, verdict: str, evidence_paths:
     placeholder_markers = [
         "placeholder is not sufficient for production GO",
         "dry-run placeholder cannot mark this gate GO",
+        "generated without an external worker",
+        "deterministic advisory placeholders",
+        "required coverage needs real diff or worker evidence",
     ]
     for rel in evidence_paths:
-        if rel.startswith(".sdlc/runs/"):
-            continue
-        if rel.startswith(("sdlc/", "tests/", "docs/", "scripts/")):
+        is_run_artifact = rel.startswith(".sdlc/runs/")
+        if rel.startswith(("sdlc/", "tests/", "scripts/")):
             continue
         path = repo / rel
         if not path.exists() or not path.is_file():
@@ -573,6 +586,8 @@ def _validate_non_placeholder_evidence(repo: Path, verdict: str, evidence_paths:
         is_placeholder_only = stripped.startswith("Gate ") and len(stripped.splitlines()) <= 3
         if is_placeholder_only and any(marker in text for marker in placeholder_markers):
             return f"Positive gate verdict cannot use placeholder-only evidence: {rel}"
+        if is_run_artifact:
+            continue
         if not _contains_concrete_evidence_reference(text):
             return f"Positive gate verdict requires concrete evidence references, not generic prose: {rel}"
     return None
@@ -1726,6 +1741,15 @@ def _valid_independent_remediation_validation(
         proof_hash = item.get("validator_actor_proof_sha256")
         if not isinstance(proof_hash, str) or not re.fullmatch(r"[a-f0-9]{64}", proof_hash):
             return False
+        if item.get("validator_actor_proof_method") != "sdlc_actor_hmac_sha256":
+            return False
+        if item.get("validator_actor_proof_verified") is not True:
+            return False
+        expected_message_sha256 = hashlib.sha256(
+            f"{item.get('run_id') or ''}:{finding.id}:{closed_by}:finding.close".encode("utf-8")
+        ).hexdigest()
+        if item.get("validator_actor_proof_message_sha256") != expected_message_sha256:
+            return False
         if actor_proof is not None:
             expected = hashlib.sha256(actor_proof.encode("utf-8")).hexdigest()
             if not hmac.compare_digest(proof_hash, expected):
@@ -2493,7 +2517,7 @@ def _create_run(
         direct_main_push_allowed=direct_main_push_allowed,
         policy_profile=policy_profile,
         gates=gates,
-        agents=classification.activated_agents,
+        agents=_policy_agent_roster(policy, classification.activated_agents),
         worker_preferences=policy.get("workers", {}),
     )
     store = RunStore(repo)
@@ -2531,6 +2555,30 @@ def _create_run(
     )
     ledger.event("classification.completed", classification=context)
     return plan, run_dir, None
+
+
+def _policy_agent_roster(policy: dict[str, Any], fallback: list[dict[str, str]]) -> list[dict[str, str]]:
+    agents_policy = policy.get("agents", {}) if isinstance(policy.get("agents"), dict) else {}
+    exact_roster = agents_policy.get("exact_roster")
+    if not isinstance(exact_roster, list) or not exact_roster:
+        return fallback
+
+    roster: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in exact_roster:
+        if not isinstance(item, dict):
+            continue
+        agent_id = str(item.get("id") or "").strip()
+        role = str(item.get("role") or "").strip()
+        if not agent_id or not role or agent_id in seen:
+            continue
+        roster.append({"id": agent_id, "role": role})
+        seen.add(agent_id)
+
+    expected_count = agents_policy.get("exact_roster_count")
+    if isinstance(expected_count, int) and len(roster) != expected_count:
+        return fallback
+    return roster or fallback
 
 
 def command_plan(args: argparse.Namespace) -> int:
@@ -2778,6 +2826,8 @@ def _release_readiness_payload(repo: Path, plan: RunPlan, findings: list[Finding
     if local_verdict == "NO_GO" and not any("Local final verdict is NO_GO" in error for error in errors):
         errors.insert(0, "Local final verdict is NO_GO; release gates are not satisfied.")
     release_satisfied = local_verdict != "NO_GO" and not errors
+    policy = load_policy(repo, plan.policy_profile)
+    release_verdict = release_contract_verdict(policy, local_verdict, release_satisfied=release_satisfied)
     authority_mode = "RELEASE_CANDIDATE_ADVISORY" if release_satisfied else "ADVISORY"
     return {
         "schema_version": 1,
@@ -2786,7 +2836,7 @@ def _release_readiness_payload(repo: Path, plan: RunPlan, findings: list[Finding
         "production_authority": "DISABLED",
         "authority_reason": "Production deployment authority is disabled by default; this run is advisory evidence until explicit human deployment approval and rollback evidence are recorded.",
         "local_verdict": local_verdict,
-        "release_verdict": local_verdict if not errors else "NO_GO",
+        "release_verdict": release_verdict,
         "release_satisfied": release_satisfied,
         "blockers": errors,
         "gate_readiness": gate_readiness,
@@ -3234,6 +3284,31 @@ def _validate_prompt_required_outputs(repo: Path, required_paths: list[str]) -> 
     return missing, invalid
 
 
+def _prompt_run_read_only_repo_error(repo: Path, path: Path, *, allow_production_read: bool) -> str | None:
+    resolved = path.resolve(strict=False)
+    repo_resolved = repo.resolve(strict=False)
+    sensitive_names = {
+        ".aws",
+        ".ssh",
+        ".codex",
+        ".docker",
+        "secrets",
+        "strat26",
+    }
+    lowered_parts = {part.lower() for part in resolved.parts}
+    if lowered_parts.intersection(sensitive_names):
+        return f"Read-only repo path is sensitive and cannot be exposed to workers: {resolved}"
+    if not allow_production_read and any(part.lower() in {"prod", "production"} for part in resolved.parts):
+        return f"Read-only production path requires --allow-production-read and policy approval: {resolved}"
+    allowed_roots = {
+        repo_resolved.parent.resolve(strict=False),
+        Path.home().joinpath("dev").resolve(strict=False),
+    }
+    if not any(resolved == root or root in resolved.parents for root in allowed_roots):
+        return f"Read-only repo path is outside allowed evidence roots: {resolved}"
+    return None
+
+
 def _supervised_prompt_text(
     *,
     prompt_text: str,
@@ -3406,6 +3481,16 @@ def command_prompt(args: argparse.Namespace) -> int:
         source_prompt=str(prompt_path),
     )
     read_only_repos = [Path(item).expanduser().resolve(strict=False) for item in args.read_only_repo]
+    for read_only_repo in read_only_repos:
+        repo_error = _prompt_run_read_only_repo_error(
+            repo,
+            read_only_repo,
+            allow_production_read=bool(args.allow_production_read),
+        )
+        if repo_error:
+            _prompt_run_progress(ledger, phase="read_only_repo_preflight", status="NO_GO", phases=phases, detail=repo_error)
+            eprint(repo_error)
+            return 3
     supervised = _supervised_prompt_text(
         prompt_text=prompt_text,
         repo=repo,
@@ -3869,6 +3954,37 @@ def command_finding(args: argparse.Namespace) -> int:
             return 3
         finding.status = "CLOSED"
         finding.closed_by = closed_by
+        if finding.severity in {"CRITICAL", "HIGH"} and getattr(args, "actor_proof", None):
+            proof_hash = hashlib.sha256(str(args.actor_proof).encode("utf-8")).hexdigest()
+            proof_message = f"{args.run_id}:{finding.id}:{closed_by}:finding.close"
+            proof_message_sha256 = hashlib.sha256(proof_message.encode("utf-8")).hexdigest()
+            proof_artifact = ledger.artifact(
+                f"artifacts/findings/{finding.id}/actor_proof.json",
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "run_id": args.run_id,
+                        "finding_id": finding.id,
+                        "closed_by": closed_by,
+                        "action": "finding.close",
+                        "actor_proof_method": "sdlc_actor_hmac_sha256",
+                        "actor_proof_verified": True,
+                        "actor_proof_sha256": proof_hash,
+                        "actor_proof_message_sha256": proof_message_sha256,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                event="finding.actor_proof",
+                finding_id=finding.id,
+                closed_by=closed_by,
+                actor_proof_method="sdlc_actor_hmac_sha256",
+                actor_proof_verified=True,
+                actor_proof_sha256=proof_hash,
+                actor_proof_message_sha256=proof_message_sha256,
+            )
+            finding.closure_evidence.append(f".sdlc/runs/{args.run_id}/{proof_artifact}")
         finding.closure_evidence.extend(evidence_paths)
         store.save_findings(args.run_id, findings)
         ledger.event(
@@ -4336,6 +4452,12 @@ def command_agents(args: argparse.Namespace) -> int:
             print(f"Agent status for {result['run_id']}:")
             for status, count in sorted(result["counts"].items()):
                 print(f"  {status}: {count}")
+    if args.agents_command == "plan":
+        scope_contract = result.get("write_scope_contract", {})
+        if isinstance(scope_contract, dict) and scope_contract.get("status") == "NO_GO":
+            for violation in scope_contract.get("violations", []):
+                eprint(f"agent write scope violation: {violation}")
+            return 3
     if args.agents_command == "execute":
         statuses = {str(task.get("status")) for task in result.get("tasks", [])}
         if statuses & {"failed", "blocked_unavailable_worker", "blocked_by_dependency", "blocked_by_permissions"}:
@@ -4632,8 +4754,18 @@ def _release_readiness_errors(
         and (repo / ".sdlc" / "runs" / plan.run_id / "plan.json").exists()
     )
     active_redteam_audit = audit_workspace_copy and _audit_readonly_worker()
+    policy = _load_release_policy_snapshot(run_dir, repo, plan.policy_profile)
     errors.extend(_ledger_integrity_errors(run_dir, require_origin=not audit_workspace_copy))
     errors.extend(_control_snapshot_divergence_errors(run_dir))
+    errors.extend(
+        _release_command_bundle_policy_errors(
+            repo,
+            run_dir,
+            policy,
+            require_origin=not audit_workspace_copy,
+        )
+    )
+    errors.extend(_operator_report_consistency_errors(repo, run_dir, findings, policy))
     if repo_identity_differs:
         if not audit_workspace:
             errors.append(f"Release validation repo mismatch: run plan repo {plan_repo} does not match active repo {repo.resolve(strict=False)}")
@@ -4653,8 +4785,8 @@ def _release_readiness_errors(
             f"Finding {finding.id} has invalid persisted integrity fields: "
             f"severity={finding.severity!r}, status={finding.status!r}"
         )
-    if open_findings(findings):
-        errors.append("Release validation found open findings")
+    if open_findings(findings, {"CRITICAL", "HIGH", "MEDIUM"}):
+        errors.append("Release validation found open blocking findings")
     worker_policy_errors = _worker_policy_integrity_errors(events)
     errors.extend(worker_policy_errors)
     redteam_consistency_errors = _redteam_finding_consistency_errors(events, findings)
@@ -4740,6 +4872,167 @@ def _release_readiness_errors(
             "final_report_reaudit",
         } and not _has_gate_completion_event(events, gate.id):
             errors.append(f"Gate {gate.id} lacks ledger-backed completion evidence")
+    return errors
+
+
+def _release_command_bundle_policy_errors(
+    repo: Path,
+    run_dir: Path,
+    policy: dict[str, Any],
+    *,
+    require_origin: bool = True,
+) -> list[str]:
+    release_policy = policy.get("release_evidence")
+    if not isinstance(release_policy, dict) or not any(release_policy.values()):
+        return []
+    rel = "artifacts/release/replayable_command_bundle_latest.json"
+    path = run_dir / rel
+    if not path.exists():
+        return [f"Release evidence policy requires replayable command bundle: {rel}"]
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return [f"Release evidence command bundle is invalid JSON: {rel}"]
+    digest = _digest_file(path)
+    provenance, provenance_error = _artifact_provenance(repo, run_dir, path, digest, require_origin=require_origin)
+    if provenance_error or provenance is None or provenance.get("event") != "release.command_bundle_recorded":
+        return [provenance_error or f"Release evidence command bundle lacks release.command_bundle_recorded provenance: {rel}"]
+    commands = payload.get("commands")
+    if not isinstance(commands, list) or not commands:
+        return ["Release evidence command bundle must contain at least one command transcript"]
+    errors: list[str] = []
+    for index, item in enumerate(commands):
+        if not isinstance(item, dict):
+            errors.append(f"Release evidence command {index} must be an object")
+            continue
+        label = str(item.get("label") or f"command[{index}]")
+        if release_policy.get("require_command_cwd_timestamp_returncode"):
+            for key in ("command", "cwd", "started_at", "ended_at", "returncode"):
+                if item.get(key) in (None, ""):
+                    errors.append(f"Release evidence command {label} missing {key}")
+            if isinstance(item.get("returncode"), bool) or not isinstance(item.get("returncode"), int):
+                errors.append(f"Release evidence command {label} returncode must be an integer")
+        if release_policy.get("require_artifact_paths_and_hashes"):
+            for stream in ("stdout", "stderr"):
+                artifact_key = f"{stream}_artifact"
+                sha_key = f"{stream}_sha256"
+                artifact_rel = item.get(artifact_key)
+                expected_sha = item.get(sha_key)
+                if not isinstance(artifact_rel, str) or not artifact_rel:
+                    errors.append(f"Release evidence command {label} missing {artifact_key}")
+                    continue
+                if not isinstance(expected_sha, str) or not re.fullmatch(r"[a-f0-9]{64}", expected_sha):
+                    errors.append(f"Release evidence command {label} missing valid {sha_key}")
+                    continue
+                artifact_path = run_dir / artifact_rel
+                if not artifact_path.exists() or not artifact_path.is_file():
+                    errors.append(f"Release evidence command {label} missing artifact {artifact_rel}")
+                    continue
+                actual_sha = _digest_file(artifact_path)
+                if actual_sha != expected_sha:
+                    errors.append(f"Release evidence command {label} {artifact_key} hash mismatch")
+    return errors
+
+
+def _operator_report_consistency_errors(
+    repo: Path,
+    run_dir: Path,
+    findings: list[Finding],
+    policy: dict[str, Any],
+) -> list[str]:
+    """Fail release when operator-facing keys-only reports drift from source or ledger state."""
+    run_id = run_dir.name
+    status_path = repo / "docs" / "reports" / "strat26_9bot_canary_gate_status.json"
+    aws_report_path = repo / "docs" / "reports" / "aws_kms_secrets_manager_backend.json"
+    release_policy = policy.get("release_evidence")
+    require_operator_reports = (
+        isinstance(release_policy, dict)
+        and release_policy.get("require_operator_report_consistency") is True
+    )
+    if not require_operator_reports and not status_path.exists() and not aws_report_path.exists():
+        return []
+    errors: list[str] = []
+    if not status_path.exists():
+        errors.append("Operator gate-status JSON report is missing")
+        return errors
+    try:
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return [f"Operator gate-status JSON report is invalid: {exc}"]
+    if status.get("run_id") != run_id:
+        errors.append("Operator gate-status report run_id does not match active run")
+
+    current_open = sorted(
+        finding.id
+        for finding in findings
+        if finding.status in {"OPEN", "FIXED_PENDING_REVIEW"} and finding.severity in {"CRITICAL", "HIGH", "MEDIUM"}
+    )
+    reported_open: list[str] = []
+    for item in status.get("blocking_open_findings", []):
+        if isinstance(item, dict) and isinstance(item.get("id"), str):
+            reported_open.append(str(item["id"]))
+        elif isinstance(item, str):
+            reported_open.append(item.split()[0])
+    if sorted(reported_open) != current_open:
+        errors.append("Operator gate-status report blocking findings diverge from findings ledger")
+
+    source_hashes = status.get("source_hashes")
+    if not isinstance(source_hashes, dict) or not source_hashes:
+        errors.append("Operator gate-status report is missing source_hashes")
+    else:
+        for rel, expected in source_hashes.items():
+            if not isinstance(rel, str) or not isinstance(expected, str):
+                errors.append("Operator gate-status report source_hashes must map paths to sha256 strings")
+                continue
+            path = repo / rel
+            if not path.exists() or not path.is_file():
+                errors.append(f"Operator gate-status source hash path is missing: {rel}")
+                continue
+            actual = _digest_file(path)
+            if actual != expected:
+                errors.append(f"Operator gate-status source hash mismatch for {rel}")
+
+    backend = status.get("aws_backend_preflight")
+    if not isinstance(backend, dict):
+        errors.append("Operator gate-status report is missing aws_backend_preflight")
+    else:
+        backend_path_value = backend.get("path")
+        if not isinstance(backend_path_value, str) or "value_bound" in backend_path_value:
+            errors.append("Operator gate-status report must not cite value-reading AWS backend proof")
+        else:
+            backend_path = repo / backend_path_value if backend_path_value.startswith(".sdlc/") else run_dir / backend_path_value
+            if not backend_path.exists():
+                errors.append("Operator gate-status AWS backend proof path is missing")
+            else:
+                try:
+                    backend_payload = json.loads(backend_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError) as exc:
+                    errors.append(f"Operator gate-status AWS backend proof is invalid JSON: {exc}")
+                else:
+                    if backend_payload.get("value_read_operations") != 0:
+                        errors.append("Operator gate-status AWS backend proof must have value_read_operations=0")
+                    if backend_payload.get("post_baseline_secret_management_events") != 0:
+                        errors.append("Operator gate-status AWS backend proof must have zero post-baseline mutations")
+                    if backend_payload.get("placeholder_baseline_checked_slots") != 36:
+                        errors.append("Operator gate-status AWS backend proof must check all 36 baseline slots")
+
+    if aws_report_path.exists():
+        try:
+            aws_report = json.loads(aws_report_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            errors.append(f"AWS backend operator report JSON is invalid: {exc}")
+        else:
+            artifact = aws_report.get("artifact")
+            if isinstance(artifact, dict):
+                path_value = str(artifact.get("path") or "")
+                if "value_bound" in path_value:
+                    errors.append("AWS backend operator report still cites value-reading proof")
+            result = aws_report.get("result")
+            if isinstance(result, dict):
+                if result.get("value_read_operations") != 0:
+                    errors.append("AWS backend operator report must record value_read_operations=0")
+                if result.get("post_baseline_secret_management_events") != 0:
+                    errors.append("AWS backend operator report must record zero post-baseline mutations")
     return errors
 
 
@@ -5027,10 +5320,28 @@ def _terminal_finding_evidence_error(repo: Path, run_dir: Path, finding: Finding
                 )
                 for item in ledger_backed
             )
+            has_actor_proof = finding.severity not in {"CRITICAL", "HIGH"} or any(
+                item.get("event") == "finding.actor_proof"
+                and item.get("finding_id") == finding.id
+                and item.get("closed_by") == finding.closed_by
+                and item.get("actor_proof_method") == "sdlc_actor_hmac_sha256"
+                and item.get("actor_proof_verified") is True
+                and isinstance(item.get("actor_proof_sha256"), str)
+                and re.fullmatch(r"[a-f0-9]{64}", str(item.get("actor_proof_sha256")))
+                and item.get("actor_proof_message_sha256")
+                == hashlib.sha256(
+                    f"{run_dir.name}:{finding.id}:{finding.closed_by}:finding.close".encode(
+                        "utf-8"
+                    )
+                ).hexdigest()
+                for item in ledger_backed
+            )
             if not has_diff:
                 return f"Finding {finding.id} closure evidence is not release-valid: missing ledger-backed remediation diff"
             if not has_validation:
                 return f"Finding {finding.id} closure evidence is not release-valid: missing independent second-validation"
+            if not has_actor_proof:
+                return f"Finding {finding.id} closure evidence is not release-valid: missing ledger-backed actor proof"
             if not has_summary:
                 return f"Finding {finding.id} closure evidence is not release-valid: missing remediation summary"
     elif finding.closed_by not in HUMAN_GATE_ACTORS:

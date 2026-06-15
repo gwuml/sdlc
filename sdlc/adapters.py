@@ -56,6 +56,10 @@ def _worker_extra_read_dirs(adapter: object) -> list[Path]:
     return dirs
 
 
+def _control_plane_pythonpath() -> str:
+    return str(Path(__file__).resolve().parents[1])
+
+
 @dataclass
 class WorkerResult:
     worker: str
@@ -154,6 +158,8 @@ class WorkerAdapter:
             "TMPDIR": str(temp_dir),
             "TMP": str(temp_dir),
             "TEMP": str(temp_dir),
+            "PYTHONPATH": _control_plane_pythonpath(),
+            "SDLC_CONTROL_PLANE_PYTHONPATH": _control_plane_pythonpath(),
             "PYTHONDONTWRITEBYTECODE": "1",
             "SDLC_WORKER_SANITIZED_ENV": "1",
         })
@@ -215,6 +221,8 @@ class WorkerAdapter:
             env["TMP"] = str(temp_dir)
             env["TEMP"] = str(temp_dir)
             env["HOME"] = str(hard_home)
+            env["CARGO_TARGET_DIR"] = str(temp_dir / "cargo-target")
+            env["SDLC_AUDIT_WRITABLE_DIR"] = str(temp_dir)
             try:
                 run_command = _macos_sandbox_exec_command(
                     _external_hard_sandbox_command(command),
@@ -640,6 +648,107 @@ def _unique_capture_dir(run_dir: Path, worker: str, mode: str, *, label: str | N
     return candidate
 
 
+def _unique_external_capture_dir(run_dir: Path, worker: str, mode: str, *, label: str | None = None) -> Path:
+    repo = run_dir.parents[2]
+    external_root = Path(os.environ.get("SDLC_EXTERNAL_EVIDENCE_ROOT", repo.parent / ".sdlc-external-evidence"))
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    safe_label = f"{label}-" if label else ""
+    base = external_root / run_dir.name / "worker-results" / f"{stamp}-{safe_label}{worker}-{mode.lower()}"
+    candidate = base
+    suffix = 2
+    while candidate.exists():
+        candidate = external_root / run_dir.name / "worker-results" / f"{stamp}-{safe_label}{worker}-{mode.lower()}-{suffix}"
+        suffix += 1
+    return candidate
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _capture_redteam_result_external(
+    *,
+    run_dir: Path,
+    mode: str,
+    prompt_path: Path,
+    result: WorkerResult,
+    ledger: Ledger,
+    label: str | None = None,
+) -> dict[str, Any]:
+    capture_dir = _unique_external_capture_dir(run_dir, result.worker, mode, label=label)
+    capture_dir.mkdir(parents=True, exist_ok=False)
+    stdout_path = capture_dir / "stdout.txt"
+    stderr_path = capture_dir / "stderr.txt"
+    external_result_path = capture_dir / "result.json"
+
+    stdout_text = redact_secrets(result.stdout)
+    stderr_text = redact_secrets(result.stderr)
+    result.mode = mode
+    result.prompt_path = _relative_to_run(run_dir, prompt_path)
+    result.output_dir = str(capture_dir)
+    result.stdout_path = str(stdout_path)
+    result.stderr_path = str(stderr_path)
+
+    stdout_path.write_text(stdout_text, encoding="utf-8")
+    stderr_path.write_text(stderr_text, encoding="utf-8")
+    result_dict = _redacted_result_dict(result)
+    external_result_path.write_text(json.dumps(result_dict, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    manifest_rel = f"artifacts/redteam/worker-captures/{capture_dir.name}/capture.json"
+    manifest = {
+        "schema_version": 1,
+        "externalized": True,
+        "worker": result.worker,
+        "mode": mode,
+        "prompt_path": result.prompt_path,
+        "external_output_dir": str(capture_dir),
+        "stdout_path": str(stdout_path),
+        "stderr_path": str(stderr_path),
+        "external_result_path": str(external_result_path),
+        "stdout_sha256": _sha256_text(stdout_text),
+        "stderr_sha256": _sha256_text(stderr_text),
+        "result_sha256": hashlib.sha256(external_result_path.read_bytes()).hexdigest(),
+        "stdout_bytes": len(stdout_text.encode("utf-8")),
+        "stderr_bytes": len(stderr_text.encode("utf-8")),
+        "returncode": result.returncode,
+        "executed": result.executed,
+        "available": result.available,
+        "timed_out": result.timed_out,
+        "stdout_truncated": result.stdout_truncated,
+        "stderr_truncated": result.stderr_truncated,
+    }
+    result.result_path = manifest_rel
+    ledger.artifact(
+        manifest_rel,
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        event="worker.output_externalized",
+        redact=False,
+        worker=result.worker,
+        mode=mode,
+        stream="manifest",
+        stdout_sha256=manifest["stdout_sha256"],
+        stderr_sha256=manifest["stderr_sha256"],
+        result_sha256=manifest["result_sha256"],
+    )
+    ledger.event(
+        "worker.completed",
+        worker=result.worker,
+        mode=mode,
+        executed=result.executed,
+        available=result.available,
+        returncode=result.returncode,
+        output_dir=result.output_dir,
+        result=result.result_path,
+        stdout=result.stdout_path,
+        stderr=result.stderr_path,
+        externalized=True,
+    )
+    captured = result.to_dict()
+    captured["external_result_path"] = str(external_result_path)
+    captured["external_capture_manifest"] = manifest_rel
+    return captured
+
+
 def capture_worker_result(
     *,
     run_dir: Path,
@@ -650,6 +759,15 @@ def capture_worker_result(
     label: str | None = None,
 ) -> dict[str, Any]:
     """Persist worker stdout/stderr and metadata as run evidence."""
+    if mode.startswith("REDTEAM_ROUND_") and result.executed:
+        return _capture_redteam_result_external(
+            run_dir=run_dir,
+            mode=mode,
+            prompt_path=prompt_path,
+            result=result,
+            ledger=ledger,
+            label=label,
+        )
     capture_dir = _unique_capture_dir(run_dir, result.worker, mode, label=label)
     stdout_rel = _relative_to_run(run_dir, capture_dir / "stdout.txt")
     stderr_rel = _relative_to_run(run_dir, capture_dir / "stderr.txt")

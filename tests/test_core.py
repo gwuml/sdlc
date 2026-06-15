@@ -19,13 +19,14 @@ from pathlib import Path
 
 import sdlc.cli as cli_module
 import sdlc.adapters as adapters_module
-from sdlc.adapters import ADAPTERS, ClaudeAdapter, CodexAdapter, GeminiAdapter, KimiAdapter, adapter_from_policy
+import sdlc.scanners as scanners_module
+from sdlc.adapters import ADAPTERS, ClaudeAdapter, CodexAdapter, GeminiAdapter, KimiAdapter, WorkerResult, adapter_from_policy
 from sdlc.audit_runtime import audit_isolation_preflight
 from sdlc.classifier import classify_feature
 from sdlc.attestations import _verify_manifest_entries
-from sdlc.cli import _final_report_attestation_event_error, _ledger_event_records_after_sequence, _ledger_integrity_errors, _release_git_provenance_source_error, _release_readiness_errors, _validate_final_report_gate_completion, _validate_git_provenance_payload, _validate_non_placeholder_evidence, _validate_release_gate_evidence, main
+from sdlc.cli import _final_report_attestation_event_error, _ledger_event_records_after_sequence, _ledger_integrity_errors, _release_command_bundle_policy_errors, _release_git_provenance_source_error, _release_readiness_errors, _validate_final_report_gate_completion, _validate_git_provenance_payload, _validate_non_placeholder_evidence, _validate_release_gate_evidence, main
 from sdlc.evidence import detected_validation_commands
-from sdlc.engine import RunStore, _create_audit_workspace, _external_hard_audit_isolation_required, _make_tree_writable, _parse_worker_findings, _prompt_binding_from_text, _repo_snapshot as engine_repo_snapshot, _worker_attested_review, _worker_declared_verdict, final_verdict, run_dry_gates
+from sdlc.engine import RunStore, _create_audit_workspace, _external_hard_audit_isolation_required, _make_tree_writable, _parse_worker_findings, _prompt_binding_from_text, _repo_snapshot as engine_repo_snapshot, _worker_attested_review, _worker_control_plane_attested_review, _worker_declared_verdict, final_verdict, run_dry_gates
 from sdlc.ledger import LEDGER_ARTIFACT_SCHEMA, LEDGER_EVENT_SCHEMA, Ledger, canonical_artifact_event, is_canonical_artifact_event, is_canonical_ledger_event, is_origin_authenticated_ledger_event, ledger_event_digest
 from sdlc.memory import export_memory
 from sdlc.models import Finding, GateState, invalid_findings, open_findings
@@ -241,6 +242,10 @@ def record_finding_closure_evidence(
 ) -> list[str]:
     run_dir = RunStore(repo).run_dir(run_id)
     ledger = Ledger(run_dir, run_id)
+    actor_proof_sha256 = hashlib.sha256(validator_actor_proof.encode("utf-8")).hexdigest() if validator_actor_proof else None
+    actor_proof_message_sha256 = hashlib.sha256(
+        f"{run_id}:{finding_id}:{validated_by}:finding.close".encode("utf-8")
+    ).hexdigest() if validator_actor_proof else None
     diff = ledger.artifact(
         f"artifacts/findings/{finding_id}/remediation.patch",
         f"diff --git a/sdlc/cli.py b/sdlc/cli.py\n--- a/sdlc/cli.py\n+++ b/sdlc/cli.py\n@@ -1 +1 @@\n-# before {finding_id}\n+# after {finding_id}\n",
@@ -254,7 +259,12 @@ def record_finding_closure_evidence(
         finding_id=finding_id,
         returncode=0,
         validated_by=validated_by,
-        **({"validator_actor_proof_sha256": hashlib.sha256(validator_actor_proof.encode("utf-8")).hexdigest()} if validator_actor_proof else {}),
+        **(({
+            "validator_actor_proof_method": "sdlc_actor_hmac_sha256",
+            "validator_actor_proof_verified": True,
+            "validator_actor_proof_sha256": actor_proof_sha256,
+            "validator_actor_proof_message_sha256": actor_proof_message_sha256,
+        }) if validator_actor_proof else {}),
     )
     summary = ledger.artifact(
         f"artifacts/findings/{finding_id}/summary.md",
@@ -262,7 +272,30 @@ def record_finding_closure_evidence(
         event="finding.remediation_summary",
         finding_id=finding_id,
     )
-    return [f".sdlc/runs/{run_id}/{rel}" for rel in (diff, validation, summary)]
+    rels = [diff, validation, summary]
+    if validator_actor_proof:
+        rels.append(ledger.artifact(
+            f"artifacts/findings/{finding_id}/actor_proof.json",
+            json.dumps({
+                "schema_version": 1,
+                "run_id": run_id,
+                "finding_id": finding_id,
+                "closed_by": validated_by,
+                "action": "finding.close",
+                "actor_proof_method": "sdlc_actor_hmac_sha256",
+                "actor_proof_verified": True,
+                "actor_proof_sha256": actor_proof_sha256,
+                "actor_proof_message_sha256": actor_proof_message_sha256,
+            }, indent=2, sort_keys=True) + "\n",
+            event="finding.actor_proof",
+            finding_id=finding_id,
+            closed_by=validated_by,
+            actor_proof_method="sdlc_actor_hmac_sha256",
+            actor_proof_verified=True,
+            actor_proof_sha256=actor_proof_sha256,
+            actor_proof_message_sha256=actor_proof_message_sha256,
+        ))
+    return [f".sdlc/runs/{run_id}/{rel}" for rel in rels]
 
 
 def record_risk_acceptance_evidence(repo: Path, run_id: str, finding_id: str, title: str | None = None) -> str:
@@ -944,6 +977,49 @@ Optional:
             self.assertIn("docs/reports/**", qa_task["write_paths"])
             self.assertNotIn("src/**", qa_task["write_paths"])
             self.assertIn(".env*", qa_task["deny_paths"])
+
+    def test_policy_can_assign_per_agent_write_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            run_id = "scoped-agent-writes"
+            self.assertEqual(main(["--repo", str(repo), "start", "Run scoped agents", "--run-id", run_id]), 0)
+            policy = read_json(repo / ".sdlc" / "policies" / "default.json")
+            policy.setdefault("permissions", {})["agent_write_paths"] = {
+                "agent_1_pm_coordinator": ["docs/agent-1-only.md"],
+                "agent_2_architecture_contracts": [],
+                "agent_3_implementation_owner": ["src/agent-3-only.rs"],
+                "agent_4_evidence_reporting_owner": [],
+                "agent_5_qa_validation_owner": [],
+                "agent_6_redteam_deploy_rollback": [],
+            }
+            write_json(repo / ".sdlc" / "policies" / "default.json", policy)
+
+            self.assertEqual(main(["--repo", str(repo), "agents", "plan", run_id, "--parallel", "6"]), 0)
+            task_plan = read_json(repo / ".sdlc" / "runs" / run_id / "artifacts" / "agents" / "task-plan.json")
+            pm_task = next(task for task in task_plan["tasks"] if task["agent_id"] == "agent_1_pm_coordinator")
+            impl_task = next(task for task in task_plan["tasks"] if task["agent_id"] == "agent_3_implementation_owner")
+
+            self.assertEqual(pm_task["write_paths"], ["docs/agent-1-only.md"])
+            self.assertEqual(impl_task["write_paths"], ["src/agent-3-only.rs"])
+            self.assertNotIn("docs/**", impl_task["write_paths"])
+
+    def test_agent_plan_rejects_overlapping_policy_write_scopes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            run_id = "overlapping-agent-writes"
+            self.assertEqual(main(["--repo", str(repo), "start", "Run scoped agents", "--run-id", run_id]), 0)
+            policy = read_json(repo / ".sdlc" / "policies" / "default.json")
+            policy.setdefault("permissions", {})["agent_write_paths"] = {
+                "agent_1_pm_coordinator": ["docs/**"],
+                "agent_2_architecture_contracts": [],
+                "agent_3_implementation_owner": ["docs/reports/evidence.md"],
+                "agent_4_evidence_reporting_owner": [],
+                "agent_5_qa_validation_owner": [],
+                "agent_6_redteam_deploy_rollback": [],
+            }
+            write_json(repo / ".sdlc" / "policies" / "default.json", policy)
+
+            self.assertEqual(main(["--repo", str(repo), "agents", "plan", run_id, "--parallel", "6"]), 3)
 
     def test_custom_worker_family_is_policy_configured(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1843,6 +1919,59 @@ Optional:
             self.assertIn("- Blocking gates: 1", report)
             self.assertIn("Local final verdict is NO_GO", report)
 
+    def test_policy_release_verdict_contract_blocks_no_go_today(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            run_id = "contract-no-go-today"
+            self.assertEqual(main(["--repo", str(repo), "init"]), 0)
+            policy_dir = repo / ".sdlc" / "policies"
+            policy_dir.mkdir(parents=True, exist_ok=True)
+            policy = {
+                "name": "contract-test",
+                "release_verdict_contract": {
+                    "blocked": "NO_GO_TODAY",
+                    "positive": "GO_FOR_KEYS_ONLY",
+                    "allowed": [
+                        "GO_FOR_KEYS_ONLY",
+                        "GO_FOR_LIVE_READ_ONLY_9_BOTS",
+                        "GO_FOR_9_BOT_SMALL_CAPITAL_CANARY_TODAY",
+                        "NO_GO_TODAY",
+                    ],
+                },
+            }
+            (policy_dir / "contract-test.json").write_text(json.dumps(policy), encoding="utf-8")
+            self.assertEqual(
+                main([
+                    "--repo",
+                    str(repo),
+                    "plan",
+                    "Contract verdict",
+                    "--run-id",
+                    run_id,
+                    "--policy",
+                    "contract-test",
+                ]),
+                0,
+            )
+            store = RunStore(repo)
+            plan = store.load_plan(run_id)
+            gate = next(item for item in plan.gates if item.id == "implementation")
+            gate.state = "FIX_REQUIRED"
+            gate.verdict = "NO_GO"
+            gate.evidence = ["evidence.md"]
+            store.save_plan(plan)
+
+            readiness = cli_module._release_readiness_payload(repo, store.load_plan(run_id), store.load_findings(run_id))
+            self.assertFalse(readiness["release_satisfied"])
+            self.assertEqual(readiness["local_verdict"], "NO_GO")
+            self.assertEqual(readiness["release_verdict"], "NO_GO_TODAY")
+
+            report = build_report(repo, run_id)
+            self.assertIn("Verdict: **NO_GO_TODAY**", report)
+            self.assertIn("- Contract verdict: NO_GO_TODAY", report)
+            self.assertIn("- Release verdict: NO_GO_TODAY", report)
+            self.assertIn("- Release satisfied: false", report)
+
     def test_report_escapes_finding_markdown_table_cells(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -2083,6 +2212,7 @@ Optional:
             self.assertIn("prompt compliance is only a secondary control", prompt)
             self.assertIn("Write audit notes and test scratch data only to the orchestrator-provided temp directory", prompt)
             self.assertIn('cd "${SDLC_WORKER_REPO:?orchestrator_repo_not_set}"', prompt)
+            self.assertIn('PYTHONPATH="${SDLC_CONTROL_PLANE_PYTHONPATH:?orchestrator_control_plane_pythonpath_not_set}"', prompt)
             self.assertIn('TMPDIR="${TMPDIR:?orchestrator_TMPDIR_not_set}"', prompt)
             self.assertIn("python -m sdlc validate --run-id redteam-prompt-scope --release --audit-workspace", prompt)
             self.assertNotIn("TMPDIR=$PWD/.sdlc-redteam-tmp", prompt)
@@ -2225,6 +2355,30 @@ Optional:
             })
             self.assertNotEqual(_prompt_binding_from_text(tampered), binding)
             self.assertFalse(_worker_attested_review(worker_output, "prompt-binding", _prompt_binding_from_text(tampered)))
+
+    def test_redteam_context_attestation_uses_control_plane_metadata_not_worker_json(self) -> None:
+        worker_output = json.dumps({
+            "verdict": "GO",
+            "reviewed_run_id": "prompt-binding",
+            "prompt_sha256": "a" * 64,
+            "findings": [],
+        })
+        result = WorkerResult(
+            "codex",
+            True,
+            True,
+            ["codex", "exec"],
+            0,
+            worker_output,
+            "",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:01Z",
+        )
+
+        self.assertTrue(_worker_attested_review(worker_output, "prompt-binding", "a" * 64))
+        self.assertFalse(_worker_control_plane_attested_review(result, "prompt-binding", "a" * 64))
+        result.prompt_path = "prompts/redteam_prompt.md"
+        self.assertTrue(_worker_control_plane_attested_review(result, "prompt-binding", "a" * 64))
 
     def test_deterministic_quality_no_go_on_failing_tests(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3002,6 +3156,20 @@ class FindingLifecycleTests(unittest.TestCase):
             self.assertEqual(main(["--repo", str(repo), "plan", "Reject placeholder evidence", "--run-id", run_id]), 0)
             self.assertNotEqual(main(["--repo", str(repo), "gate", "complete", run_id, "intake_scope", "--verdict", "GO", "--actor", "agent_1_pm_coordinator", "--evidence", "placeholder.md"]), 0)
 
+    def test_run_artifact_placeholder_evidence_is_not_exempt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            rel = ".sdlc/runs/run-artifact-placeholder/artifacts/gates/intake_scope/placeholder.md"
+            path = repo / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                "Gate intake_scope generated without an external worker.\n",
+                encoding="utf-8",
+            )
+            error = _validate_non_placeholder_evidence(repo, "GO", [rel])
+            self.assertIsNotNone(error)
+            self.assertIn("placeholder-only evidence", error or "")
+
     def test_security_scan_no_go_requires_structured_residual_acceptance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -3486,6 +3654,19 @@ class WorkerCaptureTests(unittest.TestCase):
         policy["network_allowed"] = True
         write_json(repo / ".sdlc" / "policies" / "default.json", policy)
 
+    def test_worker_env_exposes_control_plane_pythonpath_for_audit_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            prompt = repo / ".sdlc" / "runs" / "audit-pythonpath" / "prompts" / "redteam_prompt.md"
+            prompt.parent.mkdir(parents=True)
+            prompt.write_text("audit prompt\n", encoding="utf-8")
+
+            env = CodexAdapter().build_env(prompt, repo, "SECURITY_REVIEW_AUDIT_WORKSPACE")
+
+            self.assertEqual(env["PYTHONPATH"], env["SDLC_CONTROL_PLANE_PYTHONPATH"])
+            self.assertTrue((Path(env["PYTHONPATH"]) / "sdlc" / "__init__.py").exists())
+            self.assertEqual(env["SDLC_WORKER_AUDIT_READONLY"], "1")
+
     def test_prompt_run_executes_prompt_and_validates_required_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -3605,6 +3786,44 @@ class WorkerCaptureTests(unittest.TestCase):
             self.assertEqual((source / "evidence.txt").read_text(encoding="utf-8"), "keep\n")
             events = self._load_events(RunStore(repo).run_dir("prompt-readonly-fixture"))
             self.assertTrue(any(event.get("event") == "prompt_run.read_only_repo_violation" for event in events))
+
+    def test_prompt_run_rejects_sensitive_read_only_repo_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "target"
+            sensitive = root / "strat26"
+            repo.mkdir()
+            sensitive.mkdir()
+            prompt = repo / ".codex" / "prompts" / "review.md"
+            prompt.parent.mkdir(parents=True)
+            prompt.write_text("# Review Fixture\n\n## Required Output Files\n\n- `docs/result.md`\n", encoding="utf-8")
+            _script, old_path = self._install_fake_worker(
+                repo,
+                "codex",
+                "#!/bin/sh\ncat >/dev/null\nmkdir -p docs\nprintf ok > docs/result.md\n",
+            )
+            try:
+                result = main([
+                    "--repo",
+                    str(repo),
+                    "prompt",
+                    "run",
+                    str(prompt),
+                    "--run-id",
+                    "prompt-sensitive-readonly",
+                    "--risk",
+                    "low",
+                    "--read-only-repo",
+                    str(sensitive),
+                    "--execute",
+                    "--allow-network",
+                    "--no-branch",
+                    "--timeout",
+                    "30",
+                ])
+            finally:
+                os.environ["PATH"] = old_path
+            self.assertEqual(result, 3)
 
     def test_high_risk_prompt_run_requires_release_preflight_before_worker_execution(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3767,6 +3986,21 @@ class WorkerCaptureTests(unittest.TestCase):
             snapshot = engine_repo_snapshot(repo)
             self.assertIn(".sdlc/runs/snapshot-run/events.jsonl", snapshot)
 
+    def test_engine_snapshot_tracks_data_and_artifacts_trees(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            data_file = repo / "data" / "fixture.txt"
+            artifact_file = repo / "artifacts" / "evidence.txt"
+            data_file.parent.mkdir(parents=True)
+            artifact_file.parent.mkdir(parents=True)
+            data_file.write_text("data\n", encoding="utf-8")
+            artifact_file.write_text("artifact\n", encoding="utf-8")
+
+            snapshot = engine_repo_snapshot(repo)
+
+            self.assertIn("data/fixture.txt", snapshot)
+            self.assertIn("artifacts/evidence.txt", snapshot)
+
     def test_worker_tempdir_is_isolated_for_build_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -3829,7 +4063,7 @@ class WorkerCaptureTests(unittest.TestCase):
             self.assertFalse(any((path / "temp-write.txt").exists() for path in writable_paths))
             self.assertIn('"verdict":"GO"', result.stdout)
 
-    def test_codex_hard_outer_sandbox_disables_nested_sandbox(self) -> None:
+    def test_codex_hard_outer_sandbox_disables_read_only_nested_sandbox(self) -> None:
         command = [
             "codex",
             "exec",
@@ -4500,6 +4734,75 @@ class WorkerCaptureTests(unittest.TestCase):
             errors = _release_readiness_errors(store, store.load_plan(run_id), store.load_findings(run_id))
             self.assertFalse(any("Red-team worker mutation violation remains" in error for error in errors))
 
+    def test_release_validation_does_not_block_on_open_low_findings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            run_id = "open-low-nonblocking"
+            self.assertEqual(main(["--repo", str(repo), "init"]), 0)
+            self.assertEqual(main(["--repo", str(repo), "plan", "Low finding", "--run-id", run_id]), 0)
+            store = RunStore(repo)
+            finding = Finding(
+                id="LOW-001",
+                severity="LOW",
+                title="Deferred live-runtime enhancement",
+                evidence=["release scope is keys-only"],
+                impact="Future runtime work remains.",
+                required_fix="Implement before live trading.",
+                owner="agent_5_qa_validation_owner",
+            )
+            store.save_findings(run_id, [finding])
+
+            errors = _release_readiness_errors(store, store.load_plan(run_id), store.load_findings(run_id))
+
+            self.assertFalse(any("open blocking findings" in error for error in errors), errors)
+
+    def test_release_evidence_policy_requires_replayable_command_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            run_id = "release-command-bundle"
+            self.assertEqual(main(["--repo", str(repo), "init"]), 0)
+            self.assertEqual(main(["--repo", str(repo), "plan", "Release bundle", "--run-id", run_id]), 0)
+            store = RunStore(repo)
+            run_dir = store.run_dir(run_id)
+            policy = {
+                "release_evidence": {
+                    "require_command_cwd_timestamp_returncode": True,
+                    "require_artifact_paths_and_hashes": True,
+                }
+            }
+
+            missing = _release_command_bundle_policy_errors(repo, run_dir, policy)
+
+            self.assertTrue(any("replayable command bundle" in error for error in missing))
+
+            ledger = Ledger(run_dir, run_id)
+            stdout_rel = ledger.artifact("artifacts/release/bundle/stdout.txt", "ok\n")
+            stderr_rel = ledger.artifact("artifacts/release/bundle/stderr.txt", "")
+            bundle = {
+                "schema_version": 1,
+                "commands": [{
+                    "label": "unit",
+                    "command": "python -m unittest",
+                    "cwd": str(repo),
+                    "started_at": "2026-05-28T00:00:00Z",
+                    "ended_at": "2026-05-28T00:00:01Z",
+                    "returncode": 0,
+                    "stdout_artifact": stdout_rel,
+                    "stdout_sha256": hashlib.sha256((run_dir / stdout_rel).read_bytes()).hexdigest(),
+                    "stderr_artifact": stderr_rel,
+                    "stderr_sha256": hashlib.sha256((run_dir / stderr_rel).read_bytes()).hexdigest(),
+                }],
+            }
+            ledger.artifact(
+                "artifacts/release/replayable_command_bundle_latest.json",
+                json.dumps(bundle, indent=2, sort_keys=True) + "\n",
+                event="release.command_bundle_recorded",
+            )
+
+            errors = _release_command_bundle_policy_errors(repo, run_dir, policy)
+
+            self.assertEqual(errors, [])
+
     def test_run_cmd_caps_large_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -4546,6 +4849,15 @@ class WorkerCaptureTests(unittest.TestCase):
         self.assertNotIn(value_two, redacted)
         self.assertNotIn(value_three, redacted)
         self.assertIn('"api_key": "[REDACTED]"', redacted)
+
+    def test_redact_secrets_handles_bybit_aliases(self) -> None:
+        compact_key = "bybit" + "auth"
+        named_key = "BYBIT_" + "AUTH"
+        payload = f"{named_key}=realisticValue123456 {compact_key}: anotherValue123456"
+        redacted = redact_secrets(payload)
+        self.assertNotIn("realisticValue123456", redacted)
+        self.assertNotIn("anotherValue123456", redacted)
+        self.assertIn("[REDACTED]", redacted)
 
 
 class ScannerEvidenceTests(unittest.TestCase):
@@ -4874,6 +5186,167 @@ class ScannerEvidenceTests(unittest.TestCase):
             summary = (RunStore(repo).run_dir(run_id) / "artifacts" / "security_scan_summary.md").read_text(encoding="utf-8")
             self.assertIn("secret_findings=1", summary)
 
+    def test_detect_secrets_ignores_explicit_no_secret_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            run_id = "detect-secrets-no-secret-metadata"
+            metadata_rel = "docs/reports/aws_kms_secrets_manager_backend.json"
+            metadata_path = repo / metadata_rel
+            metadata_path.parent.mkdir(parents=True, exist_ok=True)
+            metadata_path.write_text(
+                '{"secrets": "not_present", "backend": "aws_secrets_manager_kms", '
+                '"secrets_kms_key_alias": "alias/mango/bybit-canary-secrets"}\n',
+                encoding="utf-8",
+            )
+            report_rel = "docs/reports/strat26_9bot_canary_gate_status.json"
+            report_path = repo / report_rel
+            report_path.write_text(
+                '{\n'
+                '  "git_head": "7bccb2cbf6cd6f608d496de4259a33d9b357c673",\n'
+                '  "hashes": {\n'
+                '    "configs/bybit_9bot_account_allowlist.json": "6557d3cf193ced9da272748e1162ce5422977246fa0f1eb7541d260fb359050b",\n'
+                '    "src/trading_safety.rs": "c810b06f072b91a3773b66a0a38260026bc9bb2ee7a6a9f6d897eefee0a6182d"\n'
+                '  }\n'
+                '}\n',
+                encoding="utf-8",
+            )
+            source_rel = "src/trading_safety.rs"
+            source_path = repo / source_rel
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.write_text(
+                'const PINNED_APPROVAL_PUBLIC_KEY_SHA256: &str = "41d43ac77196031df8d9dff2f71706d3d3ef662cdf09f018c1a7550a03963102";\n'
+                'const PINNED_APPROVAL_PUBLIC_KEY_DER_SHA256: &str = "eb21f87082b13d2de17984af349383eedcbc0c5b42cad372a4839d82fa2bee92";\n'
+                'let _artifact_binding = (approval.aws_secret_backend_sha256, approval.strat26_inventory_sha256, approval.secret_backend);\n'
+                'violations.push("allowlist must declare secrets as not_present".to_string());\n',
+                encoding="utf-8",
+            )
+            scanner_rel = "src/bin/scan_sdlc_artifacts.rs"
+            scanner_path = repo / scanner_rel
+            scanner_path.parent.mkdir(parents=True, exist_ok=True)
+            scanner_path.write_text(
+                'const SYNTHETIC_BYBIT_SCANNER_FIXTURE_SHA256: &str = "9c385062c42c8214cea5157f6e7bab6afa59c5838035a133a9f0368bc09522a0";\n',
+                encoding="utf-8",
+            )
+            payload = json.dumps({
+                "results": {
+                    metadata_rel: [{
+                        "type": "Secret Keyword",
+                        "line_number": 1,
+                        "hashed_secret": "metadata-only",
+                    }],
+                    source_rel: [
+                        {
+                            "type": "Hex High Entropy String",
+                            "line_number": 1,
+                            "hashed_secret": "public-key-sha",
+                        },
+                        {
+                            "type": "Hex High Entropy String",
+                            "line_number": 2,
+                            "hashed_secret": "public-key-der-sha",
+                        },
+                        {
+                            "type": "Secret Keyword",
+                            "line_number": 3,
+                            "hashed_secret": "approval-binding",
+                        },
+                        {
+                            "type": "Secret Keyword",
+                            "line_number": 4,
+                            "hashed_secret": "no-secret-message",
+                        },
+                    ],
+                    scanner_rel: [
+                        {
+                            "type": "Hex High Entropy String",
+                            "line_number": 1,
+                            "hashed_secret": "scanner-fixture-digest",
+                        },
+                    ],
+                    report_rel: [
+                        {
+                            "type": "Hex High Entropy String",
+                            "line_number": 2,
+                            "hashed_secret": "git-head",
+                        },
+                        {
+                            "type": "Hex High Entropy String",
+                            "line_number": 4,
+                            "hashed_secret": "allowlist-digest",
+                        },
+                        {
+                            "type": "Hex High Entropy String",
+                            "line_number": 5,
+                            "hashed_secret": "source-digest",
+                        },
+                    ],
+                }
+            }) + "\n"
+            old_path = os.environ.get("PATH", "")
+            self._install_fake_tool(repo, "bandit", exit_code=0, output="{}\n")
+            self._install_fake_tool(repo, "detect-secrets", exit_code=0, output=payload)
+            try:
+                self.assertEqual(main(["--repo", str(repo), "init"]), 0)
+                self.assertEqual(main(["--repo", str(repo), "plan", "Detect no-secret metadata", "--run-id", run_id]), 0)
+                self._satisfy_scan_prerequisites(repo, run_id)
+                self.assertEqual(main(["--repo", str(repo), "scan", run_id, "--fail-on-findings"]), 0)
+            finally:
+                os.environ["PATH"] = old_path
+            summary = (RunStore(repo).run_dir(run_id) / "artifacts" / "security_scan_summary.md").read_text(encoding="utf-8")
+            self.assertIn("detect-secrets", summary)
+            self.assertIn("secret_findings=0", summary)
+
+    def test_detect_secrets_cleanup_warning_with_only_benign_metadata_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            path = repo / "src" / "trading_safety.rs"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                'const PINNED_APPROVAL_PUBLIC_KEY_SHA256: &str = "41d43ac77196031df8d9dff2f71706d3d3ef662cdf09f018c1a7550a03963102";\n',
+                encoding="utf-8",
+            )
+            payload = json.dumps({
+                "results": {
+                    "src/trading_safety.rs": [{
+                        "type": "Hex High Entropy String",
+                        "line_number": 1,
+                        "hashed_secret": "public-key-sha",
+                    }]
+                }
+            })
+            normalized = scanners_module._normalize_detect_secrets(repo, {
+                "returncode": 125,
+                "stdout": payload,
+                "stderr": "Worker process descendants remained after cleanup",
+                "process_tree_cleanup_ok": False,
+            })
+            self.assertEqual(normalized["status"], "PASS")
+            self.assertFalse(normalized["blocking"])
+            self.assertIn("cleanup_warning=true", normalized["summary"])
+
+    def test_detect_secrets_cleanup_warning_still_blocks_real_findings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "app.py").write_text("api_key = 'real-looking-value'\n", encoding="utf-8")
+            payload = json.dumps({
+                "results": {
+                    "app.py": [{
+                        "type": "Secret Keyword",
+                        "line_number": 1,
+                        "hashed_secret": "secret-hash",
+                    }]
+                }
+            })
+            normalized = scanners_module._normalize_detect_secrets(repo, {
+                "returncode": 125,
+                "stdout": payload,
+                "stderr": "Worker process descendants remained after cleanup",
+                "process_tree_cleanup_ok": False,
+            })
+            self.assertEqual(normalized["status"], "FAIL")
+            self.assertTrue(normalized["blocking"])
+            self.assertIn("secret_findings=1", normalized["summary"])
+
 
 class RedTeamExecutionTests(unittest.TestCase):
     def _install_fake_worker(self, repo: Path, name: str, body: str) -> str:
@@ -5038,6 +5511,24 @@ class RedTeamExecutionTests(unittest.TestCase):
                 _make_tree_writable(audit_repo)
                 audit_temp.cleanup()
 
+    def test_audit_workspace_copies_data_and_artifacts_as_readonly_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            for rel in ("data/input.csv", "artifacts/evidence.md"):
+                path = repo / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("immutable evidence\n", encoding="utf-8")
+            audit_temp, audit_repo = _create_audit_workspace(repo)
+            try:
+                for rel in ("data/input.csv", "artifacts/evidence.md"):
+                    copied = audit_repo / rel
+                    self.assertTrue(copied.exists())
+                    with self.assertRaises(OSError):
+                        copied.write_text("mutated\n", encoding="utf-8")
+            finally:
+                _make_tree_writable(audit_repo)
+                audit_temp.cleanup()
+
     def test_redteam_records_unavailable_workers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
@@ -5085,8 +5576,9 @@ print('{"verdict":"GO","findings":[]}')
             summary = (run_dir / "artifacts" / "redteam_execution_summary.md").read_text(encoding="utf-8")
             self.assertIn("worker_timeout_seconds: 1", summary)
             self.assertIn("timed_out_workers: codex@round1:per_worker:1s", summary)
-            result_path = next((run_dir / "worker-results").glob("*/result.json"))
-            result = json.loads(result_path.read_text(encoding="utf-8"))
+            manifest_path = next((run_dir / "artifacts" / "redteam" / "worker-captures").glob("*/capture.json"))
+            manifest = read_json(manifest_path)
+            result = read_json(Path(manifest["external_result_path"]))
             self.assertTrue(result["timed_out"])
             self.assertEqual(result["timeout_seconds"], 1)
             self.assertEqual(result["timeout_scope"], "per_worker")
@@ -5120,8 +5612,9 @@ sys.stdout.write('{"verdict":"GO","reviewed_run_id":"redteam-worker-truncated","
             summary = (run_dir / "artifacts" / "redteam_execution_summary.md").read_text(encoding="utf-8")
             self.assertIn("truncated_workers: codex@round1:stdout:64chars", summary)
             self.assertIn("Red-team worker output was truncated", summary)
-            result_path = next((run_dir / "worker-results").glob("*/result.json"))
-            result = json.loads(result_path.read_text(encoding="utf-8"))
+            manifest_path = next((run_dir / "artifacts" / "redteam" / "worker-captures").glob("*/capture.json"))
+            manifest = read_json(manifest_path)
+            result = read_json(Path(manifest["external_result_path"]))
             self.assertTrue(result["stdout_truncated"])
             self.assertFalse(result["stderr_truncated"])
             self.assertEqual(result["max_output_chars"], 64)
@@ -5404,7 +5897,8 @@ print(json.dumps({
             run_dir = RunStore(repo).run_dir(run_id)
             summary = (run_dir / "artifacts" / "redteam_execution_summary.md").read_text(encoding="utf-8")
             self.assertIn("hard_audit_isolated_workers: openai-review@round1:container:fake-docker", summary)
-            self.assertIn("audit_isolation_attestations: artifacts/redteam/round-1-openai-review-runtime-attestation.json", summary)
+            self.assertIn("artifacts/redteam/isolation/round-1-openai-review.json", summary)
+            self.assertIn("artifacts/redteam/round-1-openai-review-runtime-attestation.json", summary)
             events = [json.loads(line) for line in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
             self.assertTrue(any(event.get("event") == "redteam.worker_hard_audit_isolated" and event.get("method") == "container:fake-docker" for event in events))
             self.assertTrue(any(event.get("event") == "redteam.isolation_attestation_written" and event.get("hard_isolation") is True for event in events))
@@ -5603,8 +6097,9 @@ printf '{"verdict":"GO","findings":[]}\\n'
             self.assertEqual(source.read_text(encoding="utf-8"), "# original\n")
             summary = (store.run_dir(run_id) / "artifacts" / "redteam_execution_summary.md").read_text(encoding="utf-8")
             self.assertIn("mutation_violations: <none>", summary)
-            result_path = next((store.run_dir(run_id) / "worker-results").glob("*/stderr.txt"))
-            self.assertIn("Permission denied", result_path.read_text(encoding="utf-8"))
+            manifest_path = next((store.run_dir(run_id) / "artifacts" / "redteam" / "worker-captures").glob("*/capture.json"))
+            manifest = read_json(manifest_path)
+            self.assertIn("Permission denied", Path(manifest["stderr_path"]).read_text(encoding="utf-8"))
 
     def test_redteam_blocks_mutate_then_revert_audit_workspace_change(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5632,8 +6127,9 @@ printf '{"verdict":"GO","findings":[]}\\n'
             store = RunStore(repo)
             summary = (store.run_dir(run_id) / "artifacts" / "redteam_execution_summary.md").read_text(encoding="utf-8")
             self.assertIn("mutation_violations: <none>", summary)
-            result_path = next((store.run_dir(run_id) / "worker-results").glob("*/stderr.txt"))
-            stderr = result_path.read_text(encoding="utf-8")
+            manifest_path = next((store.run_dir(run_id) / "artifacts" / "redteam" / "worker-captures").glob("*/capture.json"))
+            manifest = read_json(manifest_path)
+            stderr = Path(manifest["stderr_path"]).read_text(encoding="utf-8")
             self.assertIn("Permission denied", stderr)
             self.assertEqual(source.read_text(encoding="utf-8"), "# original\n")
 
@@ -5786,14 +6282,14 @@ print(json.dumps({
             self.assertIn("executed_families: gemini", summary)
             self.assertIn("unverified_positive_worker_verdicts: <none>", summary)
 
-    def test_redteam_positive_verdict_without_prompt_context_is_no_go(self) -> None:
+    def test_redteam_positive_verdict_without_worker_echo_uses_control_plane_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
-            run_id = "redteam-context-missing"
+            run_id = "redteam-context-control-plane"
             old_path = self._install_fake_worker(repo, "codex", "#!/bin/sh\ncat >/dev/null\nprintf '{\"verdict\":\"GO\",\"findings\":[]}\\n'\n")
             try:
                 self.assertEqual(main(["--repo", str(repo), "init"]), 0)
-                self.assertEqual(main(["--repo", str(repo), "plan", "Unbound redteam GO", "--run-id", run_id, "--risk", "low"]), 0)
+                self.assertEqual(main(["--repo", str(repo), "plan", "Control-plane bound redteam GO", "--run-id", run_id, "--risk", "low"]), 0)
                 self._allow_worker_network(repo)
                 self.assertEqual(main([
                     "--repo", str(repo), "redteam", "execute", run_id,
@@ -5805,10 +6301,9 @@ print(json.dumps({
                 os.environ["PATH"] = old_path
             store = RunStore(repo)
             gate = next(item for item in store.load_plan(run_id).gates if item.id == "independent_redteam_cross_model")
-            self.assertEqual(gate.verdict, "NO_GO")
-            self.assertIn("reviewed_run_id and prompt_sha256", gate.notes)
+            self.assertEqual(gate.verdict, "GO")
             summary = (store.run_dir(run_id) / "artifacts" / "redteam_execution_summary.md").read_text(encoding="utf-8")
-            self.assertIn("unverified_positive_worker_verdicts: codex@round1", summary)
+            self.assertIn("unverified_positive_worker_verdicts: <none>", summary)
 
     def test_redteam_parser_prioritizes_final_agent_json_over_transport_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

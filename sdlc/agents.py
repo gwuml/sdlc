@@ -73,6 +73,7 @@ def plan_agents(plan: RunPlan, policy: dict[str, Any], *, requested_parallelism:
         "execute_default": "DRY_RUN",
         "tasks": tasks,
         "batches": batches,
+        "write_scope_contract": _write_scope_contract(tasks, policy),
     }
 
 
@@ -242,12 +243,18 @@ def _task_for_agent(plan: RunPlan, policy: dict[str, Any], agent: dict[str, str]
 
 
 def _agent_read_paths(agent_id: str, policy: dict[str, Any]) -> list[str]:
+    scoped = _agent_permission_paths(policy, "agent_read_paths", agent_id)
+    if scoped is not None:
+        return scoped
     if agent_id == "agent_3_implementation_owner":
         return _unique_paths([*DEFAULT_AGENT_READ_PATHS, *_implementer_allow_paths(policy)])
     return list(DEFAULT_AGENT_READ_PATHS)
 
 
 def _agent_write_paths(agent_id: str, policy: dict[str, Any], defaults: dict[str, Any]) -> list[str]:
+    scoped = _agent_permission_paths(policy, "agent_write_paths", agent_id)
+    if scoped is not None:
+        return scoped
     if agent_id == "agent_3_implementation_owner":
         allow_paths = _implementer_allow_paths(policy)
         if allow_paths:
@@ -273,6 +280,72 @@ def _implementer_permissions(policy: dict[str, Any]) -> dict[str, Any]:
     permissions = policy.get("permissions", {}) if isinstance(policy.get("permissions"), dict) else {}
     implementer = permissions.get("implementer", {}) if isinstance(permissions.get("implementer"), dict) else {}
     return implementer
+
+
+def _agent_permission_paths(policy: dict[str, Any], key: str, agent_id: str) -> list[str] | None:
+    permissions = policy.get("permissions", {}) if isinstance(policy.get("permissions"), dict) else {}
+    scoped_paths = permissions.get(key, {}) if isinstance(permissions.get(key), dict) else {}
+    if agent_id not in scoped_paths:
+        return None
+    paths = scoped_paths.get(agent_id)
+    return list(paths) if isinstance(paths, list) else []
+
+
+def _write_scope_contract(tasks: list[dict[str, Any]], policy: dict[str, Any]) -> dict[str, Any]:
+    permissions = policy.get("permissions", {}) if isinstance(policy.get("permissions"), dict) else {}
+    configured = permissions.get("agent_write_paths", {}) if isinstance(permissions.get("agent_write_paths"), dict) else {}
+    violations: list[str] = []
+    if not configured:
+        return {
+            "required": False,
+            "status": "GO",
+            "violations": violations,
+        }
+    if configured:
+        configured_agents = set(configured)
+        planned_agents = {str(task.get("agent_id")) for task in tasks}
+        for agent_id in sorted(planned_agents - configured_agents):
+            violations.append(f"{agent_id} is missing an explicit agent_write_paths entry")
+    scoped_tasks = [
+        (str(task.get("agent_id")), [str(path) for path in task.get("write_paths", [])])
+        for task in tasks
+    ]
+    for left_index, (left_agent, left_paths) in enumerate(scoped_tasks):
+        for right_agent, right_paths in scoped_tasks[left_index + 1:]:
+            for left_path in left_paths:
+                for right_path in right_paths:
+                    if _path_scope_overlap(left_path, right_path):
+                        violations.append(
+                            f"{left_agent}:{left_path} overlaps {right_agent}:{right_path}"
+                        )
+    return {
+        "required": bool(configured),
+        "status": "GO" if not violations else "NO_GO",
+        "violations": violations,
+    }
+
+
+def _path_scope_overlap(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    left_prefix = _static_scope_prefix(left)
+    right_prefix = _static_scope_prefix(right)
+    if left.endswith("/**") and right.startswith(left_prefix):
+        return True
+    if right.endswith("/**") and left.startswith(right_prefix):
+        return True
+    if not any(marker in left for marker in "*?[") and not any(marker in right for marker in "*?["):
+        return left.startswith(f"{right}/") or right.startswith(f"{left}/")
+    return bool(left_prefix and right_prefix and (left_prefix.startswith(right_prefix) or right_prefix.startswith(left_prefix)) and (left.endswith("*") or right.endswith("*")))
+
+
+def _static_scope_prefix(pattern: str) -> str:
+    prefix = []
+    for char in pattern:
+        if char in "*?[":
+            break
+        prefix.append(char)
+    return "".join(prefix).rstrip("/")
 
 
 def _unique_paths(paths: list[str]) -> list[str]:

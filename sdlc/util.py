@@ -17,6 +17,8 @@ from typing import Any
 
 SECRET_PATTERNS = [
     re.compile(r"(?i)(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)(\s*[:=]\s*)([^\s\"']+)"),
+    re.compile(r"(?i)(bybit[_ -]?(?:api[_ -]?)?(?:key|secret|auth|credential|credentials|token|session|password|passphrase|private[_ -]?key))(\s*[:=]\s*)([^\s\"']+)"),
+    re.compile(r"(?i)((?:mango[_-]?)?bybit(?:api)?(?:key|secret|auth|credential|credentials|token|session|password|passphrase|privatekey|apiid|keyid|accessid|accesskey|accesssecret))(\s*[:=]\s*)([^\s\"']+)"),
     re.compile(r"(?i)(bearer\s+)[a-z0-9._~+/=-]{20,}"),
     re.compile(r"AKIA[0-9A-Z]{16}"),
     re.compile(r"ASIA[0-9A-Z]{16}"),
@@ -25,6 +27,8 @@ SECRET_PATTERNS = [
 ]
 QUOTED_SECRET_PATTERNS = [
     re.compile(r"(?i)((?:\"|')?(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)(?:\"|')?\s*[:=]\s*)([\"'])(.*?)(\2)"),
+    re.compile(r"(?i)((?:\"|')?bybit[_ -]?(?:api[_ -]?)?(?:key|secret|auth|credential|credentials|token|session|password|passphrase|private[_ -]?key)(?:\"|')?\s*[:=]\s*)([\"'])(.*?)(\2)"),
+    re.compile(r"(?i)((?:\"|')?(?:mango[_-]?)?bybit(?:api)?(?:key|secret|auth|credential|credentials|token|session|password|passphrase|privatekey|apiid|keyid|accessid|accesskey|accesssecret)(?:\"|')?\s*[:=]\s*)([\"'])(.*?)(\2)"),
 ]
 
 SUBPROCESS_ENV_ALLOWLIST = {
