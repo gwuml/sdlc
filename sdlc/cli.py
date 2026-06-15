@@ -5431,6 +5431,57 @@ def _validate_git_context_gate_release(plan: RunPlan, repo: Path, run_dir: Path,
     return None
 
 
+def command_bench(args: argparse.Namespace) -> int:
+    """Measured, evidence-based benchmark over the 12 goal-spec dimensions."""
+    from . import bench as bench_mod
+
+    repo = Path(args.repo).resolve()
+    bench_dir = repo / "artifacts" / "bench"
+
+    def readiness_fn(run_id: str) -> dict[str, object]:
+        store = RunStore(repo)
+        plan = store.load_plan(run_id)
+        findings = store.load_findings(run_id)
+        return _release_readiness_payload(repo, plan, findings)
+
+    if args.bench_command == "run":
+        result = bench_mod.measure(repo, readiness_fn)
+        if not args.no_write:
+            bench_dir.mkdir(parents=True, exist_ok=True)
+            write_json(bench_dir / "after.json", result)
+            (bench_dir / "report.md").write_text(bench_mod.report_markdown(result), encoding="utf-8")
+        if args.json:
+            print(json.dumps(result, indent=2, sort_keys=True))
+        else:
+            print(f"Benchmark: {result['measured_dimensions']}/{result['total_dimensions']} dimensions measured "
+                  f"across {result['runs_evaluated']} runs; overall score={result['overall_score']}")
+            for key, dim in result["dimensions"].items():
+                mark = dim["score"] if dim["status"] == "MEASURED" else "UNAVAILABLE"
+                print(f"  {key:<32} {mark}")
+        return 0
+
+    if args.bench_command == "compare":
+        before = read_json(Path(args.before))
+        after = read_json(Path(args.after))
+        diff = bench_mod.compare(before, after)
+        if not args.no_write:
+            bench_dir.mkdir(parents=True, exist_ok=True)
+            write_json(bench_dir / "diff.json", diff)
+        print(json.dumps(diff, indent=2, sort_keys=True))
+        return 0
+
+    if args.bench_command == "report":
+        result_path = Path(args.result) if args.result else (bench_dir / "after.json")
+        if not result_path.exists():
+            eprint(f"No benchmark result at {result_path}; run `sdlc bench run` first.")
+            return 1
+        print(bench_mod.report_markdown(read_json(result_path)))
+        return 0
+
+    eprint("Unknown bench command")
+    return 2
+
+
 def command_validate(args: argparse.Namespace) -> int:
     repo = Path(args.repo).resolve()
     errors: list[str] = []
@@ -5841,6 +5892,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_validate.add_argument("--persist", action="store_true", help="With --release, persist refreshed readiness and report artifacts.")
     p_validate.add_argument("--structural-only", action="store_true", help="With --run-id, only check files/schema and do not treat blocked gates as command failure.")
     p_validate.set_defaults(func=command_validate)
+
+    p_bench = sub.add_parser("bench", help="Measured, evidence-based benchmark over the 12 dimensions")
+    bench_sub = p_bench.add_subparsers(dest="bench_command", required=True)
+    b_run = bench_sub.add_parser("run", help="Measure all dimensions and write artifacts/bench/after.json")
+    b_run.add_argument("--json", action="store_true", help="Emit the full result as JSON")
+    b_run.add_argument("--no-write", action="store_true", help="Do not write artifacts")
+    b_run.set_defaults(func=command_bench)
+    b_compare = bench_sub.add_parser("compare", help="Diff two benchmark results per dimension")
+    b_compare.add_argument("--before", required=True, help="Path to baseline/before result JSON")
+    b_compare.add_argument("--after", required=True, help="Path to after result JSON")
+    b_compare.add_argument("--no-write", action="store_true", help="Do not write diff.json")
+    b_compare.set_defaults(func=command_bench)
+    b_report = bench_sub.add_parser("report", help="Render a benchmark result as markdown")
+    b_report.add_argument("--result", help="Result JSON path (default artifacts/bench/after.json)")
+    b_report.set_defaults(func=command_bench)
 
     return parser
 
