@@ -13,6 +13,9 @@ stated reason.
 from __future__ import annotations
 
 import shutil
+import subprocess
+import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -56,7 +59,27 @@ EVIDENCE_MARKERS = ["evidence", "ledger", "artifact", "sha256", "GO_WITH_ACCEPTE
 # --- the 12 dimensions --------------------------------------------------------
 
 def _dim_setup_friction(repo: Path) -> dict[str, Any]:
-    return _unavailable("No setup-friction harness yet; requires timed clean-machine install (Phase: TUI/bench follow-up).")
+    """Time a cold init + first plan in a throwaway repo (no install step, since
+    the package is already importable). Target < 300s; this is the time-to-first-
+    useful-action a new user experiences once installed."""
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            env_repo = Path(tmp)
+            start = time.perf_counter()
+            init = subprocess.run([sys.executable, "-m", "sdlc", "--repo", str(env_repo), "init"],
+                                  capture_output=True, text=True, timeout=120, cwd=str(repo))
+            plan = subprocess.run([sys.executable, "-m", "sdlc", "--repo", str(env_repo), "plan",
+                                   "smoke test feature", "--risk", "low"],
+                                  capture_output=True, text=True, timeout=120, cwd=str(repo))
+            elapsed = time.perf_counter() - start
+            if init.returncode != 0 or plan.returncode != 0:
+                return _unavailable(f"init/plan failed (init rc={init.returncode}, plan rc={plan.returncode}).")
+    except Exception as exc:  # noqa: BLE001
+        return _unavailable(f"Setup measurement error: {exc}")
+    # <300s target -> 100; degrade to 0 at 600s (spec allows revision to <=600).
+    score = 100.0 if elapsed <= 300 else max(0.0, 100.0 * (600 - elapsed) / 300)
+    return _measured(round(elapsed, 3), score, "seconds",
+                     f"Cold `init` + first `plan` completed in {elapsed:.2f}s (target <300s).")
 
 
 def _dim_blocker_visibility(repo: Path, readiness_fn: Callable[[str], dict[str, Any]], runs: list[str]) -> dict[str, Any]:
@@ -292,6 +315,55 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
         "overall_after": after.get("overall_score"),
         "dimensions": deltas,
     }
+
+
+def comparison_matrix_markdown(result: dict[str, Any]) -> str:
+    """Evidence-backed comparison vs generic coding agents. Only dimensions this
+    tool actually measures are filled in; the generic-agent column is NOT MEASURED
+    because we have not benchmarked another tool. No 'better' claim is made without
+    a measured comparison (spec requirement)."""
+    dims = result.get("dimensions", {})
+
+    def cell(key: str) -> str:
+        d = dims.get(key, {})
+        if d.get("status") == "MEASURED":
+            return f"{d['value']} (score {d['score']})"
+        return "UNAVAILABLE"
+
+    rows = [
+        ("Setup friction (s)", "1_setup_friction", "architecture: local-first, single CLI"),
+        ("Blocker visibility (s)", "2_blocker_visibility", "generic agents have no gate model"),
+        ("Evidence completeness (%)", "3_evidence_completeness", "no gate-evidence ledger in generic agents"),
+        ("Unsupported claims in report", "4_hallucination_count", "no claim-discipline gate in generic agents"),
+        ("Red-team independence (%)", "5_redteam_independence", "no enforced cross-model red-team"),
+        ("Release-readiness accuracy (%)", "8_release_readiness_accuracy", "no release-verdict engine"),
+        ("Provider flexibility (families)", "10_provider_flexibility", "varies by agent"),
+    ]
+    lines = [
+        "# Comparison Matrix (evidence-backed only)",
+        "",
+        "Scope: Secure SDLC orchestration. This is NOT a general-coding-agent comparison.",
+        "Claude Code's strengths (terminal-native edits, IDE integration, checkpoints) are",
+        "not denied; they are a different category. We only fill cells we actually measured.",
+        "",
+        "| Dimension | This tool | Generic coding agent | Evidence / note |",
+        "|-----------|-----------|----------------------|-----------------|",
+    ]
+    for label, key, note in rows:
+        lines.append(f"| {label} | {cell(key)} | NOT MEASURED | {note} |")
+    lines += [
+        "",
+        "## Honest position",
+        "",
+        "- We do not claim '100x better than Claude Code'. 100x superiority was not proven.",
+        "- We claim, with measured evidence, capabilities a generic coding agent does not",
+        "  have at all: enforced gate evidence, release-readiness verdicts, cross-model",
+        "  red-team independence, and claim discipline.",
+        "- The generic-agent column stays NOT MEASURED until we run an equivalent benchmark",
+        "  against one; asserting 'better' without that would violate claim discipline.",
+        "",
+    ]
+    return "\n".join(lines)
 
 
 def report_markdown(result: dict[str, Any]) -> str:

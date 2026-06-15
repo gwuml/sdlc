@@ -35,6 +35,13 @@ class BenchHelperTests(unittest.TestCase):
         md = bench.report_markdown(result)
         self.assertIn("100x superiority was not proven", md)
 
+    def test_comparison_matrix_is_honest(self) -> None:
+        result = bench.measure(_repo(), _stub_readiness)
+        md = bench.comparison_matrix_markdown(result)
+        # No 'better' claim without measuring the other tool.
+        self.assertIn("NOT MEASURED", md)
+        self.assertIn("100x superiority was not proven", md)
+
 
 class BenchMeasureTests(unittest.TestCase):
     def test_measure_returns_all_twelve_dimensions(self) -> None:

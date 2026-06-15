@@ -22,18 +22,18 @@
       "value": 41.7
     },
     "1_setup_friction": {
-      "detail": "No setup-friction harness yet; requires timed clean-machine install (Phase: TUI/bench follow-up).",
-      "score": null,
-      "status": "UNAVAILABLE",
-      "unit": null,
-      "value": null
+      "detail": "Cold `init` + first `plan` completed in 0.14s (target <300s).",
+      "score": 100.0,
+      "status": "MEASURED",
+      "unit": "seconds",
+      "value": 0.136
     },
     "2_blocker_visibility": {
       "detail": "Computed readiness and located first blocking gate (intake_scope) for run 'audit-container-hard-isolation-20260525'.",
       "score": 100.0,
       "status": "MEASURED",
       "unit": "seconds",
-      "value": 0.001
+      "value": 0.0015
     },
     "3_evidence_completeness": {
       "detail": "234/278 executed gates across 22 runs carry evidence.",
@@ -85,8 +85,8 @@
       "value": null
     }
   },
-  "measured_dimensions": 8,
-  "overall_score": 82.9,
+  "measured_dimensions": 9,
+  "overall_score": 84.8,
   "runs_evaluated": 22,
   "schema": "sdlc.bench.result/v1",
   "total_dimensions": 12

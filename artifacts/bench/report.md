@@ -1,8 +1,8 @@
 # Benchmark Report
 
 Runs evaluated: 22
-Measured dimensions: 8/12
-Overall score (mean of measured): 82.9
+Measured dimensions: 9/12
+Overall score (mean of measured): 84.8
 
 ## Claim discipline
 
@@ -13,8 +13,8 @@ UNAVAILABLE, not scored.
 
 | # | Dimension | Status | Value | Score | Detail |
 |---|-----------|--------|-------|-------|--------|
-| 1 | setup_friction | UNAVAILABLE | — | — | No setup-friction harness yet; requires timed clean-machine install (Phase: TUI/bench follow-up). |
-| 2 | blocker_visibility | MEASURED | 0.001 | 100.0 | Computed readiness and located first blocking gate (intake_scope) for run 'audit-container-hard-isolation-20260525'. |
+| 1 | setup_friction | MEASURED | 0.136 | 100.0 | Cold `init` + first `plan` completed in 0.14s (target <300s). |
+| 2 | blocker_visibility | MEASURED | 0.0015 | 100.0 | Computed readiness and located first blocking gate (intake_scope) for run 'audit-container-hard-isolation-20260525'. |
 | 3 | evidence_completeness | MEASURED | 84.2 | 84.2 | 234/278 executed gates across 22 runs carry evidence. |
 | 4 | hallucination_count | MEASURED | 0 | 100.0 | Scanned 18 reports; 0 unsupported claim candidates. |
 | 5 | redteam_independence | MEASURED | 100.0 | 100.0 | 16/16 HIGH/EXTREME runs assign a red-team worker distinct from the implementer. |

@@ -5447,6 +5447,7 @@ def command_bench(args: argparse.Namespace) -> int:
             bench_dir.mkdir(parents=True, exist_ok=True)
             write_json(bench_dir / "after.json", result)
             (bench_dir / "report.md").write_text(bench_mod.report_markdown(result), encoding="utf-8")
+            (bench_dir / "comparison_matrix.md").write_text(bench_mod.comparison_matrix_markdown(result), encoding="utf-8")
         if args.json:
             print(json.dumps(result, indent=2, sort_keys=True))
         else:
