@@ -4545,29 +4545,26 @@ def command_memory(args: argparse.Namespace) -> int:
 
 
 def command_tui(args: argparse.Namespace) -> int:
+    from . import dashboard
+
     repo = Path(args.repo).resolve()
     store = RunStore(repo)
     plan = store.load_plan(args.run_id)
     findings = store.load_findings(args.run_id)
     readiness = _release_readiness_payload(repo, plan, findings)
     next_action = _recommend_next_action(plan, findings, readiness)
-    print("=" * 80)
-    print("SDLC CONTROL PLANE")
-    print("=" * 80)
-    _print_status(plan, readiness)
-    print("\nCommand hints:")
-    print(f"  {next_action['command']}")
-    print(f"  sdlc next {args.run_id}")
-    print(f"  sdlc agents status {args.run_id}")
-    print(f"  sdlc finding list {args.run_id}")
-    print(f"  sdlc report {args.run_id} --print")
-    print("\nOpen findings:")
-    open_items = [f for f in findings if f.status == "OPEN"]
-    if not open_items:
-        print("  <none>")
-    for finding in open_items:
-        print(f"  {finding.id} {finding.severity:<8} {finding.title}")
-    print("=" * 80)
+    model = dashboard.build_dashboard_model(repo, plan, findings, readiness, next_action)
+
+    # Plain text when explicitly requested, when not a tty (CI/pipes), or as a
+    # safe fallback if curses cannot start.
+    if getattr(args, "no_tui", False) or not sys.stdout.isatty():
+        print(dashboard.render_plain(model))
+        return 0
+    try:
+        dashboard.run_curses(model)
+    except Exception as exc:  # noqa: BLE001 - never crash; degrade to plain text.
+        eprint(f"Interactive TUI unavailable ({exc}); showing plain dashboard.")
+        print(dashboard.render_plain(model))
     return 0
 
 
@@ -5861,6 +5858,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_tui = sub.add_parser("tui", help="Show a terminal dashboard for a run")
     p_tui.add_argument("run_id")
+    p_tui.add_argument("--no-tui", action="store_true", help="Plain-text dashboard (no interactive curses)")
     p_tui.set_defaults(func=command_tui)
 
     p_release = sub.add_parser("release", help="Check and prepare release-lane prerequisites")
