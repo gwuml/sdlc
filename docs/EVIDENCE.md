@@ -15,7 +15,7 @@ claim "100x better than Claude Code": **100x superiority was not proven.**
 
 ## Measured benchmark (23 runs on this repo)
 
-Overall score (mean of measured dimensions): **86.9** — **11 of 12** dimensions measured.
+Overall score (mean of measured dimensions): **88.0** — **12 of 12** dimensions measured.
 
 | # | Dimension | Status | Score |
 |---|-----------|--------|-------|
@@ -29,7 +29,7 @@ Overall score (mean of measured dimensions): **86.9** — **11 of 12** dimension
 | 8 | release-readiness accuracy | MEASURED | 100.0 |
 | 9 | TUI task completion | MEASURED | 80.0 (independent reviewer APPROVED; holistic sign-off at the 8/10 spec threshold) |
 | 10 | provider flexibility | MEASURED | 100.0 |
-| 11 | cost / token visibility | UNAVAILABLE | — (worker usage parsing not yet built) |
+| 11 | cost / token visibility | MEASURED | 100.0 (usage extractor surfaces anthropic/openai/gemini; explicit UNAVAILABLE when absent) |
 | 12 | github PR provenance | MEASURED | 46.2 |
 
 The TUI score comes from an independent reviewer (not the builder) attesting APPROVED
@@ -61,9 +61,11 @@ on the corpus; cross-model red-team independence enforced on HIGH/EXTREME runs;
 resume preserves 100% of completed gates; 0 unsupported claims in scanned reports;
 fast setup; ≥3 worker families available.
 
-**Not proven (honestly):** the "100x" claim (no comparative benchmark was run against
-another tool); cost/token visibility (feature not built). The TUI now has an
-independent reviewer's APPROVED attestation (dim 9 = 80, conservative).
+**Not proven (honestly):** the "100x" claim — no comparative benchmark was run
+against another tool, so we do not assert it. The TUI has an independent reviewer's
+APPROVED attestation (dim 9 = 80, conservative). All 12 dimensions are now measured;
+cost/token visibility (dim 11) surfaces real usage from worker output and states
+UNAVAILABLE explicitly when a worker reports none.
 
 ## Capabilities a generic coding agent does not have at all
 

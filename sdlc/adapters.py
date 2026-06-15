@@ -130,6 +130,13 @@ class WorkerResult:
             data["stdout_path"] = self.stdout_path
         if self.stderr_path is not None:
             data["stderr_path"] = self.stderr_path
+        # Always surface cost/token usage for executed runs — real figures when the
+        # worker reported them, explicit UNAVAILABLE otherwise. Never silently omit.
+        from .usage import extract_usage
+        if self.executed:
+            data["usage"] = extract_usage(self.stdout)
+        else:
+            data["usage"] = {"status": "UNAVAILABLE", "reason": "worker not executed (dry-run or unavailable)"}
         return data
 
 

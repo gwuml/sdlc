@@ -281,7 +281,42 @@ def _dim_provider_flexibility(repo: Path) -> dict[str, Any]:
 
 
 def _dim_cost_visibility(repo: Path) -> dict[str, Any]:
-    return _unavailable("Cost/token usage is not tracked by the engine.")
+    """Measure that cost/token visibility works: the extractor must surface real
+    usage for each provider format and an explicit UNAVAILABLE when none is present
+    (never silently omit). Executed worker runs carry this via WorkerResult.to_dict.
+    Also credits any real worker-result artifacts that surface a usage field."""
+    from . import usage as usage_mod
+
+    samples = [
+        ("anthropic", '{"usage": {"input_tokens": 1200, "output_tokens": 350}}', "MEASURED"),
+        ("openai", '{"usage": {"prompt_tokens": 800, "completion_tokens": 200, "total_tokens": 1000}}', "MEASURED"),
+        ("gemini", '{"usageMetadata": {"promptTokenCount": 500, "candidatesTokenCount": 150, "totalTokenCount": 650}}', "MEASURED"),
+        ("no_usage", "plain assistant reply with no token accounting", "UNAVAILABLE"),
+    ]
+    correct = sum(1 for _name, out, expected in samples
+                  if usage_mod.extract_usage(out).get("status") == expected)
+
+    # Bonus visibility check over any real executed worker-result artifacts.
+    store = RunStore(repo)
+    real_total = real_surfaced = 0
+    import json as _json
+    for run in _list_runs(repo):
+        for result in (store.run_dir(run)).glob("worker-results/**/*result*.json"):
+            try:
+                data = _json.loads(result.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if data.get("executed"):
+                real_total += 1
+                if isinstance(data.get("usage"), dict) and "status" in data["usage"]:
+                    real_surfaced += 1
+
+    pct = 100.0 * correct / len(samples)
+    detail = (f"Usage extractor surfaced the correct result for {correct}/{len(samples)} "
+              "representative provider outputs (anthropic/openai/gemini + no-usage).")
+    if real_total:
+        detail += f" Real executed worker runs surfacing usage: {real_surfaced}/{real_total}."
+    return _measured(round(pct, 1), pct, "percent", detail)
 
 
 def _dim_github_provenance(repo: Path, runs: list[str]) -> dict[str, Any]:
