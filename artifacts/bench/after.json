@@ -15,18 +15,18 @@
       "value": null
     },
     "12_github_pr_provenance": {
-      "detail": "5/12 git-active runs have ledger-backed provenance.",
-      "score": 41.7,
+      "detail": "6/13 git-active runs have ledger-backed provenance.",
+      "score": 46.2,
       "status": "MEASURED",
       "unit": "percent",
-      "value": 41.7
+      "value": 46.2
     },
     "1_setup_friction": {
-      "detail": "Cold `init` + first `plan` completed in 0.14s (target <300s).",
+      "detail": "Cold `init` + first `plan` completed in 0.15s (target <300s).",
       "score": 100.0,
       "status": "MEASURED",
       "unit": "seconds",
-      "value": 0.142
+      "value": 0.15
     },
     "2_blocker_visibility": {
       "detail": "Computed readiness and located first blocking gate (intake_scope) for run 'audit-container-hard-isolation-20260525'.",
@@ -36,11 +36,11 @@
       "value": 0.0014
     },
     "3_evidence_completeness": {
-      "detail": "234/278 executed gates across 22 runs carry evidence.",
-      "score": 84.2,
+      "detail": "258/302 executed gates across 23 runs carry evidence.",
+      "score": 85.4,
       "status": "MEASURED",
       "unit": "percent",
-      "value": 84.2
+      "value": 85.4
     },
     "4_hallucination_count": {
       "detail": "Scanned 18 reports; 0 unsupported claim candidates.",
@@ -50,7 +50,7 @@
       "value": 0
     },
     "5_redteam_independence": {
-      "detail": "16/16 HIGH/EXTREME runs assign a red-team worker distinct from the implementer.",
+      "detail": "17/17 HIGH/EXTREME runs assign a red-team worker distinct from the implementer.",
       "score": 100.0,
       "status": "MEASURED",
       "unit": "percent",
@@ -64,14 +64,14 @@
       "value": 100.0
     },
     "7_failed_tool_visibility": {
-      "detail": "3/8 scan summaries surface tool status explicitly.",
-      "score": 37.5,
+      "detail": "4/9 scan summaries surface tool status explicitly.",
+      "score": 44.4,
       "status": "MEASURED",
       "unit": "percent",
-      "value": 37.5
+      "value": 44.4
     },
     "8_release_readiness_accuracy": {
-      "detail": "22/22 runs: release verdict is consistent with blocker presence.",
+      "detail": "23/23 runs: release verdict is consistent with blocker presence.",
       "score": 100.0,
       "status": "MEASURED",
       "unit": "percent",
@@ -86,8 +86,8 @@
     }
   },
   "measured_dimensions": 10,
-  "overall_score": 86.3,
-  "runs_evaluated": 22,
+  "overall_score": 87.6,
+  "runs_evaluated": 23,
   "schema": "sdlc.bench.result/v1",
   "total_dimensions": 12
 }
