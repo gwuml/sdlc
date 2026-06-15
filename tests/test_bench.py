@@ -63,12 +63,16 @@ class BenchMeasureTests(unittest.TestCase):
                 self.assertGreaterEqual(dim["score"], 0.0)
                 self.assertLessEqual(dim["score"], 100.0)
 
-    def test_unmeasured_dimensions_are_honest(self) -> None:
-        # Dimensions with no tooling must be UNAVAILABLE, never a fabricated score.
+    def test_no_dimension_carries_a_faked_score(self) -> None:
+        # The core honesty invariant: a dimension is either MEASURED with a real
+        # 0-100 score, or UNAVAILABLE with NO score. Never an UNAVAILABLE-with-score.
         result = bench.measure(_repo(), _stub_readiness)
-        # dim 11 (cost/token) is not tracked and must stay honestly UNAVAILABLE.
-        # (dim 9 becomes MEASURED once an independent TUI review is on file.)
-        self.assertEqual(result["dimensions"]["11_cost_token_visibility"]["status"], "UNAVAILABLE")
+        for key, dim in result["dimensions"].items():
+            if dim["status"] == "UNAVAILABLE":
+                self.assertIsNone(dim["score"], f"{key} is UNAVAILABLE but carries a score")
+            else:
+                self.assertEqual(dim["status"], "MEASURED", f"{key} has an invalid status")
+                self.assertIsInstance(dim["score"], float, f"{key} MEASURED without a numeric score")
 
     def test_tui_dimension_requires_independent_review(self) -> None:
         # Without a review file, dim 9 is UNAVAILABLE; a builder-authored review
