@@ -58,7 +58,10 @@ The workflow:
 3. Code-signs and notarizes the macOS binaries (operator Apple credentials, via CI secrets).
 4. Generates `sbom.cdx.json` with `cargo-cyclonedx` and fails if any `Cargo.lock`
    package name+version is missing from the SBOM (content equality, not count).
-5. Produces `SHA256SUMS`, signs it (`SHA256SUMS.sig`) with a key from `KEYS.md` or Sigstore.
+5. Produces `SHA256SUMS` and signs it with **Sigstore keyless cosign** (no stored
+   private key), emitting `SHA256SUMS.sig` + `SHA256SUMS.pem` from a release
+   identity registered in `KEYS.md`; the signature is logged to the public Rekor
+   transparency log.
 6. Demonstrates reproducibility: builds twice on the same commit and `diff`s `SHA256SUMS`.
 7. Greps the final report for unsupported "100x" claims and fails if any exist
    without benchmark evidence.

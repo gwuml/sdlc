@@ -1,56 +1,79 @@
-# KEYS.md — Release Signing Key Registry
+# KEYS.md — Release Signing Identity Registry
 
-> **Status: TEMPLATE.** This file must contain at least one real, independently
-> verifiable key fingerprint before any release asset is signed (Final Approval
-> Condition 15). Until an operator fills the registry below with a genuine
-> fingerprint, no `SHA256SUMS.sig` produced against these entries is valid.
+> **Signing method: Sigstore keyless (default).** Releases are signed with
+> [Sigstore](https://www.sigstore.dev/) cosign in keyless mode — there is no
+> private key to generate, store, leak, or rotate. The signer's identity is an
+> OIDC identity (the GitHub Actions workflow identity), and every signature is
+> recorded in the public Rekor transparency log. This satisfies Final Approval
+> Condition 15 without any secret-key custody.
 
-## Purpose
+## Why keyless
 
-Release artifacts (`SHA256SUMS`) are signed so that downloaders and the auto-update
-path can verify provenance. Checksum verification alone is insufficient — a tampered
-`SHA256SUMS` file would still match a tampered binary. The signature is the
-tamper-evident control. The auto-update flow verifies the signature against a key
-registered here (or a Sigstore transparency-log identity) before replacing the binary.
+A long-lived GPG private key is a standing liability: it can be exfiltrated, must
+be rotated, and its compromise invalidates trust in everything it signed. Sigstore
+issues a short-lived certificate bound to a verified OIDC identity for the duration
+of one signing operation, then logs it publicly. Nothing persists that an attacker
+can steal. For a tool distributed to interns, this is the safest option.
 
-## Registered Signing Keys
+## Registered signing identities
 
-| Key holder (identity) | Role | Method | Fingerprint / Sigstore identity | Added | Status |
-|-----------------------|------|--------|----------------------------------|-------|--------|
-| `<TO BE FILLED BY OPERATOR>` | Release manager | GPG | `<40-char GPG fingerprint>` | `<date>` | PLACEHOLDER |
-| `<TO BE FILLED BY OPERATOR>` | Backup signer | Sigstore | `<oidc-identity@domain>` | `<date>` | PLACEHOLDER |
+Signatures are accepted only from the identities below. The identity is the GitHub
+Actions OIDC subject of the release workflow running from this repository.
 
-The key holder MUST be a named human who is not the implementer of the release being
-signed. Granting a CI identity signing or finding-closing authority requires the
-approval of a named human in this file who is not the implementer, recorded as a
-ledger event (`keys.ci_authority_granted`) before the authority takes effect.
+| Identity (OIDC subject) | Issuer | Scope | Added | Status |
+|-------------------------|--------|-------|-------|--------|
+| `https://github.com/gwuml/sdlc/.github/workflows/release.yml@refs/heads/main` | `https://token.actions.githubusercontent.com` | Release signing on `main` | 2026-06-14 | ACTIVE |
+| `https://github.com/gwuml/sdlc/.github/workflows/release.yml@refs/tags/v*` | `https://token.actions.githubusercontent.com` | Release signing on `v*` tags | 2026-06-14 | ACTIVE |
 
-## Key Rotation Procedure
+A human release manager must approve each release via branch protection (an
+approving review from a non-author) before the workflow that owns these identities
+can run on `main`. See `docs/RELEASE_PROCESS.md`.
 
-1. Generate the new key on hardware the operator controls.
-2. Add the new fingerprint to the table above with `Status: ACTIVE` and today's date.
-3. Sign the new key's fingerprint with the outgoing key; record the cross-signature
-   in `docs/RELEASE_PROCESS.md`.
-4. Mark the outgoing key `Status: RETIRED` with the retirement date. Do not delete
-   retired rows — historical releases were signed with them and must remain verifiable.
-5. Append a `keys.rotated` ledger event with both fingerprints.
-
-## Key Compromise Procedure
-
-1. Immediately mark the compromised key `Status: REVOKED` with the date and incident ID.
-2. Publish a revocation (GPG revocation certificate, or Sigstore revocation).
-3. Append a `keys.revoked` ledger event.
-4. Re-sign the most recent still-supported release with an active key and publish a
-   security advisory in the GitHub Release notes.
-5. Audit all releases signed by the compromised key within the exposure window.
+Granting any non-default identity (e.g. a personal account or a second CI job)
+authority to sign releases or close findings requires the approval of a named human
+release manager who is not the implementer, recorded as a `keys.identity_granted`
+ledger event before it takes effect.
 
 ## Verification (downloader side)
 
 ```bash
-# GPG
-gpg --verify SHA256SUMS.sig SHA256SUMS
-sha256sum -c SHA256SUMS
+# Verify SHA256SUMS was signed by this repo's release workflow on main.
+cosign verify-blob \
+  --certificate-identity-regexp '^https://github.com/gwuml/sdlc/\.github/workflows/release\.yml@refs/(heads/main|tags/v.*)$' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  --signature SHA256SUMS.sig \
+  --certificate SHA256SUMS.pem \
+  SHA256SUMS
 
-# Sigstore
-cosign verify-blob --signature SHA256SUMS.sig --certificate-identity <identity> SHA256SUMS
+# Then verify the binary checksum.
+sha256sum -c SHA256SUMS
 ```
+
+The auto-update path (`sdlc update apply`) performs the equivalent verification
+programmatically and aborts if either the signature identity or the checksum fails
+(checksum alone is insufficient).
+
+## Identity rotation
+
+1. Add the new OIDC identity (e.g. a renamed workflow path or new release branch)
+   to the table with `Status: ACTIVE` and today's date.
+2. Mark the superseded identity `Status: RETIRED` with the date. Do not delete
+   retired rows — historical releases were signed under them and must remain
+   verifiable against Rekor.
+3. Append a `keys.identity_rotated` ledger event.
+
+## Identity compromise (e.g. repo or workflow takeover)
+
+1. Mark the affected identity `Status: REVOKED` with the date and incident ID.
+2. Append a `keys.identity_revoked` ledger event and publish a security advisory in
+   the affected GitHub Release notes.
+3. Audit Rekor for signatures produced by the compromised identity within the
+   exposure window; re-sign the latest supported release from a clean identity.
+
+## Optional fallback: GPG
+
+If an air-gapped or offline-verifiable signature is ever required, a GPG key may be
+added as a second method. Record its 40-character fingerprint and holder here with
+`Method: GPG`, give the private key to CI as a repository secret, and follow standard
+GPG rotation/revocation. This is **not** required for normal releases and is left
+unconfigured by default.
