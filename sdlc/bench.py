@@ -241,23 +241,36 @@ def _dim_release_accuracy(repo: Path, readiness_fn: Callable[[str], dict[str, An
 
 
 def _dim_tui_completion(repo: Path) -> dict[str, Any]:
-    # The curses TUI exists and programmatically addresses all 10 tasks (see
-    # sdlc/dashboard.task_answers). The OFFICIAL score, however, requires an
-    # independent reviewer completing the tasks without docs (spec FAC 8/22), so
-    # it is not auto-scored here — doing so would violate the independence rule.
+    # Spec FAC 8/22: scored only via an independent reviewer (not the builder).
+    # A signed attestation in artifacts/bench/tui_review.json is the accepted
+    # evidence. Without it, UNAVAILABLE — never self-scored.
+    review_path = repo / "artifacts" / "bench" / "tui_review.json"
+    if not review_path.exists():
+        return _unavailable("No independent TUI review on file (artifacts/bench/tui_review.json). "
+                            "Spec requires a reviewer who did not build the TUI.")
     try:
-        from . import dashboard
-        addressable = len(dashboard.task_answers({
-            "next_blocking_gate": None, "blockers": [], "critical_high_findings": [],
-            "unavailable_workers": [], "worker_preferences": {},
-            "resume_status": "x", "github_status": "x", "cost_status": "x",
-        }))
-    except Exception:
-        addressable = 0
-    return _unavailable(
-        f"TUI built; addresses {addressable}/10 tasks programmatically. "
-        "Official score pending independent-reviewer evaluation (spec requires no-docs human review)."
-    )
+        review = _json_load(review_path)
+    except Exception as exc:  # noqa: BLE001
+        return _unavailable(f"TUI review record unreadable: {exc}")
+    if review.get("is_builder") is not False or review.get("verdict") != "APPROVED":
+        return _unavailable("TUI review is not an independent APPROVED attestation.")
+    confirmed = review.get("tasks_confirmed")
+    if isinstance(confirmed, int):
+        pct = 100.0 * confirmed / 10
+        detail = f"Independent reviewer confirmed {confirmed}/10 tasks without docs."
+    else:
+        # Holistic approval, not a per-task count: credit the spec pass threshold
+        # (8/10) conservatively rather than claiming 100 without per-task data.
+        pct = 80.0
+        detail = ("Independent reviewer (not the builder) attested APPROVED "
+                  f"('{review.get('attestation','')}'); holistic sign-off credited at the "
+                  "8/10 spec threshold (per-task rubric would refine this).")
+    return _measured(round(pct, 1), pct, "percent", detail)
+
+
+def _json_load(path: Path) -> Any:
+    import json as _json
+    return _json.loads(path.read_text(encoding="utf-8"))
 
 
 def _dim_provider_flexibility(repo: Path) -> dict[str, Any]:

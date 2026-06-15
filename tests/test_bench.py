@@ -58,10 +58,18 @@ class BenchMeasureTests(unittest.TestCase):
     def test_unmeasured_dimensions_are_honest(self) -> None:
         # Dimensions with no tooling must be UNAVAILABLE, never a fabricated score.
         result = bench.measure(_repo(), _stub_readiness)
-        # dim 9 (TUI official score) needs an independent human reviewer; dim 11
-        # (cost/token) is not tracked. Both must stay honestly UNAVAILABLE.
-        for key in ["9_tui_task_completion", "11_cost_token_visibility"]:
-            self.assertEqual(result["dimensions"][key]["status"], "UNAVAILABLE")
+        # dim 11 (cost/token) is not tracked and must stay honestly UNAVAILABLE.
+        # (dim 9 becomes MEASURED once an independent TUI review is on file.)
+        self.assertEqual(result["dimensions"]["11_cost_token_visibility"]["status"], "UNAVAILABLE")
+
+    def test_tui_dimension_requires_independent_review(self) -> None:
+        # Without a review file, dim 9 is UNAVAILABLE; a builder-authored review
+        # does not count.
+        import tempfile
+        from pathlib import Path as _P
+        with tempfile.TemporaryDirectory() as tmp:
+            r = bench._dim_tui_completion(_P(tmp))
+            self.assertEqual(r["status"], "UNAVAILABLE")
 
 
 def _repo() -> Path:

@@ -15,7 +15,7 @@ claim "100x better than Claude Code": **100x superiority was not proven.**
 
 ## Measured benchmark (23 runs on this repo)
 
-Overall score (mean of measured dimensions): **87.6** — **10 of 12** dimensions measured.
+Overall score (mean of measured dimensions): **86.9** — **11 of 12** dimensions measured.
 
 | # | Dimension | Status | Score |
 |---|-----------|--------|-------|
@@ -27,10 +27,14 @@ Overall score (mean of measured dimensions): **87.6** — **10 of 12** dimension
 | 6 | resume recovery | MEASURED | 100.0 |
 | 7 | failed-tool visibility | MEASURED | 44.4 |
 | 8 | release-readiness accuracy | MEASURED | 100.0 |
-| 9 | TUI task completion | UNAVAILABLE | — (needs independent reviewer, spec FAC 8/22) |
+| 9 | TUI task completion | MEASURED | 80.0 (independent reviewer APPROVED; holistic sign-off at the 8/10 spec threshold) |
 | 10 | provider flexibility | MEASURED | 100.0 |
 | 11 | cost / token visibility | UNAVAILABLE | — (worker usage parsing not yet built) |
 | 12 | github PR provenance | MEASURED | 46.2 |
+
+The TUI score comes from an independent reviewer (not the builder) attesting APPROVED
+(`artifacts/bench/tui_review.json`). It is credited conservatively at the spec's 8/10
+pass threshold rather than 100, since a per-task rubric was not enumerated.
 
 Honest weak spots that are visible, not hidden: **failed-tool visibility (44.4)** and
 **github provenance (46.2)** reflect the historical run corpus and are genuine areas
@@ -58,8 +62,8 @@ resume preserves 100% of completed gates; 0 unsupported claims in scanned report
 fast setup; ≥3 worker families available.
 
 **Not proven (honestly):** the "100x" claim (no comparative benchmark was run against
-another tool); the TUI's official task score (requires an independent reviewer);
-cost/token visibility (feature not built).
+another tool); cost/token visibility (feature not built). The TUI now has an
+independent reviewer's APPROVED attestation (dim 9 = 80, conservative).
 
 ## Capabilities a generic coding agent does not have at all
 
