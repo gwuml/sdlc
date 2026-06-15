@@ -49,22 +49,24 @@ ledger event before the authority takes effect.
 
 ## The workflow is the only build path
 
-Release assets are produced **exclusively** by `release.yml` on pinned runners
-(`ubuntu-22.04`, `macos-14`). No release asset may be built on a developer laptop.
-The workflow:
+Release assets are produced **exclusively** by `release.yml` on a pinned runner
+(`ubuntu-22.04`). No release asset may be built on a developer laptop.
 
-1. Verifies the active toolchain matches `rust-toolchain.toml` (else fails).
-2. Cross-builds the four targets.
-3. Code-signs and notarizes the macOS binaries (operator Apple credentials, via CI secrets).
-4. Generates `sbom.cdx.json` with `cargo-cyclonedx` and fails if any `Cargo.lock`
-   package name+version is missing from the SBOM (content equality, not count).
-5. Produces `SHA256SUMS` and signs it with **Sigstore keyless cosign** (no stored
-   private key), emitting `SHA256SUMS.sig` + `SHA256SUMS.pem` from a release
-   identity registered in `KEYS.md`; the signature is logged to the public Rekor
-   transparency log.
-6. Demonstrates reproducibility: builds twice on the same commit and `diff`s `SHA256SUMS`.
-7. Greps the final report for unsupported "100x" claims and fails if any exist
-   without benchmark evidence.
+**Active path — Python distribution (the current shippable deliverable):**
+
+1. Builds the sdist + wheel with `python -m build`.
+2. Generates a CycloneDX SBOM (`sbom.cdx.json`) and fails if any dependency declared
+   in `pyproject.toml` is missing from the SBOM (content equality, not count).
+3. Produces `SHA256SUMS` over the distribution + SBOM.
+4. Signs `SHA256SUMS` with **Sigstore keyless cosign** → `SHA256SUMS.sig` +
+   `SHA256SUMS.pem`, logged to the public Rekor transparency log (no stored key).
+5. Uploads assets to the GitHub Release on a `v*` tag (build artifacts otherwise).
+6. A separate gate fails the run on unsupported "100x" claims in the benchmark report.
+
+**Deferred path — Rust binary (Phase 6, disabled job `rust-binary`):** pinned runners
+`ubuntu-22.04` / `macos-14`, `rust-toolchain.toml` verification, double-build for
+byte-identical `SHA256SUMS`, and macOS codesign + notarization (needs an Apple
+Developer cert via CI secrets). Enable when the Rust binary reaches command parity.
 
 ## Release checklist (maps to Final Approval Conditions)
 

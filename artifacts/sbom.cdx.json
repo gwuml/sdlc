@@ -1,0 +1,50 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "version": 1,
+  "metadata": {
+    "component": {
+      "type": "application",
+      "name": "sdlc",
+      "version": "0.1.0"
+    }
+  },
+  "components": [
+    {
+      "type": "library",
+      "name": "bandit",
+      "version": ">=1.7.10",
+      "purl": "pkg:pypi/bandit"
+    },
+    {
+      "type": "library",
+      "name": "checkov",
+      "version": ">=3.2.0",
+      "purl": "pkg:pypi/checkov"
+    },
+    {
+      "type": "library",
+      "name": "detect-secrets",
+      "version": ">=1.5.0",
+      "purl": "pkg:pypi/detect-secrets"
+    },
+    {
+      "type": "library",
+      "name": "jsonschema",
+      "version": ">=4.22.0",
+      "purl": "pkg:pypi/jsonschema"
+    },
+    {
+      "type": "library",
+      "name": "Markdown",
+      "version": "==3.8.1",
+      "purl": "pkg:pypi/markdown"
+    },
+    {
+      "type": "library",
+      "name": "pip-audit",
+      "version": ">=2.7.3",
+      "purl": "pkg:pypi/pip-audit"
+    }
+  ]
+}
