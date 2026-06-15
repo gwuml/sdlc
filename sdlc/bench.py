@@ -161,7 +161,46 @@ def _dim_redteam_independence(repo: Path, runs: list[str]) -> dict[str, Any]:
 
 
 def _dim_resume_recovery(repo: Path) -> dict[str, Any]:
-    return _unavailable("Resume is not implemented in the reference engine.")
+    """Measure that re-running advances from the last completed gate without losing
+    completed work. run_dry_gates skips GO/SKIPPED/WAIVED gates, so a re-run is a
+    resume. We prove it end-to-end in a throwaway repo: run once, record completed
+    gates, run again, and verify every completed gate is preserved unchanged."""
+    import json as _json
+
+    def _sdlc(args: list[str], cwd: Path, env_repo: Path) -> subprocess.CompletedProcess:
+        return subprocess.run([sys.executable, "-m", "sdlc", "--repo", str(env_repo), *args],
+                              capture_output=True, text=True, timeout=180, cwd=str(cwd))
+
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            env_repo = Path(tmp)
+            if _sdlc(["init"], repo, env_repo).returncode != 0:
+                return _unavailable("init failed during resume measurement.")
+            if _sdlc(["plan", "resume test feature", "--risk", "low"], repo, env_repo).returncode != 0:
+                return _unavailable("plan failed during resume measurement.")
+            run_dirs = list((env_repo / ".sdlc" / "runs").iterdir())
+            if not run_dirs:
+                return _unavailable("no run created during resume measurement.")
+            run_id = run_dirs[0].name
+            plan_path = run_dirs[0] / "plan.json"
+
+            _sdlc(["run", run_id], repo, env_repo)  # first pass
+            first = {g["id"]: (g["state"], g.get("verdict"))
+                     for g in _json.loads(plan_path.read_text())["gates"]}
+            completed = {gid: sv for gid, sv in first.items() if sv[0] in {"GO", "SKIPPED", "WAIVED"}}
+
+            _sdlc(["run", run_id], repo, env_repo)  # resume pass
+            second = {g["id"]: (g["state"], g.get("verdict"))
+                      for g in _json.loads(plan_path.read_text())["gates"]}
+
+            if not completed:
+                return _unavailable("no gates completed in first pass; nothing to resume.")
+            preserved = sum(1 for gid, sv in completed.items() if second.get(gid) == sv)
+            pct = 100.0 * preserved / len(completed)
+            return _measured(round(pct, 1), pct, "percent",
+                             f"{preserved}/{len(completed)} completed gates preserved across a resume re-run.")
+    except Exception as exc:  # noqa: BLE001
+        return _unavailable(f"Resume measurement error: {exc}")
 
 
 def _dim_failed_tool_visibility(repo: Path, runs: list[str]) -> dict[str, Any]:

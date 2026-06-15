@@ -58,7 +58,9 @@ class BenchMeasureTests(unittest.TestCase):
     def test_unmeasured_dimensions_are_honest(self) -> None:
         # Dimensions with no tooling must be UNAVAILABLE, never a fabricated score.
         result = bench.measure(_repo(), _stub_readiness)
-        for key in ["6_resume_recovery", "9_tui_task_completion", "11_cost_token_visibility"]:
+        # dim 9 (TUI official score) needs an independent human reviewer; dim 11
+        # (cost/token) is not tracked. Both must stay honestly UNAVAILABLE.
+        for key in ["9_tui_task_completion", "11_cost_token_visibility"]:
             self.assertEqual(result["dimensions"][key]["status"], "UNAVAILABLE")
 
 

@@ -26,14 +26,14 @@
       "score": 100.0,
       "status": "MEASURED",
       "unit": "seconds",
-      "value": 0.136
+      "value": 0.142
     },
     "2_blocker_visibility": {
       "detail": "Computed readiness and located first blocking gate (intake_scope) for run 'audit-container-hard-isolation-20260525'.",
       "score": 100.0,
       "status": "MEASURED",
       "unit": "seconds",
-      "value": 0.0015
+      "value": 0.0014
     },
     "3_evidence_completeness": {
       "detail": "234/278 executed gates across 22 runs carry evidence.",
@@ -57,11 +57,11 @@
       "value": 100.0
     },
     "6_resume_recovery": {
-      "detail": "Resume is not implemented in the reference engine.",
-      "score": null,
-      "status": "UNAVAILABLE",
-      "unit": null,
-      "value": null
+      "detail": "15/15 completed gates preserved across a resume re-run.",
+      "score": 100.0,
+      "status": "MEASURED",
+      "unit": "percent",
+      "value": 100.0
     },
     "7_failed_tool_visibility": {
       "detail": "3/8 scan summaries surface tool status explicitly.",
@@ -85,8 +85,8 @@
       "value": null
     }
   },
-  "measured_dimensions": 9,
-  "overall_score": 84.8,
+  "measured_dimensions": 10,
+  "overall_score": 86.3,
   "runs_evaluated": 22,
   "schema": "sdlc.bench.result/v1",
   "total_dimensions": 12
