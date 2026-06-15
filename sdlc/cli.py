@@ -5483,6 +5483,30 @@ def command_bench(args: argparse.Namespace) -> int:
     return 2
 
 
+def command_learn(args: argparse.Namespace) -> int:
+    """Self-improvement loop: record lessons, suggest proposals, apply approvals."""
+    from . import learn as learn_mod
+
+    repo = Path(args.repo).resolve()
+    if args.learn_command == "record":
+        store = RunStore(repo)
+        plan = store.load_plan(args.run_id)
+        findings = store.load_findings(args.run_id)
+        result = learn_mod.record_lessons(repo, plan, findings)
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    if args.learn_command == "suggest":
+        result = learn_mod.suggest_proposals(repo)
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    if args.learn_command == "apply":
+        result = learn_mod.apply_proposal(repo, args.proposal, actor=args.actor or "", execute=args.execute)
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0 if result.get("status") in {"APPLIED", "DRY_RUN", "ALREADY_APPLIED"} else 1
+    eprint("Unknown learn command")
+    return 2
+
+
 def command_diff(args: argparse.Namespace) -> int:
     """Structural quality diff between two runs (distinct from `bench compare`)."""
     from . import diff as diff_mod
@@ -5925,6 +5949,19 @@ def build_parser() -> argparse.ArgumentParser:
     b_report = bench_sub.add_parser("report", help="Render a benchmark result as markdown")
     b_report.add_argument("--result", help="Result JSON path (default artifacts/bench/after.json)")
     b_report.set_defaults(func=command_bench)
+
+    p_learn = sub.add_parser("learn", help="Self-improvement loop: record, suggest, apply")
+    learn_sub = p_learn.add_subparsers(dest="learn_command", required=True)
+    l_record = learn_sub.add_parser("record", help="Record pattern-level lessons from a run")
+    l_record.add_argument("run_id")
+    l_record.set_defaults(func=command_learn)
+    l_suggest = learn_sub.add_parser("suggest", help="Suggest proposals from recurring lessons")
+    l_suggest.set_defaults(func=command_learn)
+    l_apply = learn_sub.add_parser("apply", help="Record human approval of a proposal (no policy change)")
+    l_apply.add_argument("--proposal", type=int, required=True)
+    l_apply.add_argument("--actor", required=True, help="Named approver (learn cannot self-approve)")
+    l_apply.add_argument("--execute", action="store_true", help="Record approval (omit for dry-run)")
+    l_apply.set_defaults(func=command_learn)
 
     p_diff = sub.add_parser("diff", help="Structural quality diff between two runs")
     diff_sub = p_diff.add_subparsers(dest="diff_command", required=True)
