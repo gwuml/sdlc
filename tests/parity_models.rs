@@ -101,7 +101,11 @@ fn plan_json_round_trips_for_every_fixture() {
         assert_value_eq(&original, &roundtrip, &path.display().to_string());
         checked += 1;
     }
-    assert!(checked > 0, "no plan.json fixtures found under {}", dir.display());
+    assert!(
+        checked > 0,
+        "no plan.json fixtures found under {}",
+        dir.display()
+    );
     eprintln!("plan.json round-trip verified for {checked} fixtures");
 }
 

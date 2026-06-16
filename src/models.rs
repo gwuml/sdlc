@@ -9,11 +9,24 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const VALID_GATE_STATES: &[&str] = &[
-    "PENDING", "READY", "RUNNING", "GO", "NO_GO", "FIX_REQUIRED", "SKIPPED", "WAIVED", "BLOCKED",
+    "PENDING",
+    "READY",
+    "RUNNING",
+    "GO",
+    "NO_GO",
+    "FIX_REQUIRED",
+    "SKIPPED",
+    "WAIVED",
+    "BLOCKED",
 ];
 pub const VALID_SEVERITIES: &[&str] = &["CRITICAL", "HIGH", "MEDIUM", "LOW"];
-pub const VALID_FINDING_STATUSES: &[&str] =
-    &["OPEN", "FIXED_PENDING_REVIEW", "CLOSED", "ACCEPTED", "DEFERRED"];
+pub const VALID_FINDING_STATUSES: &[&str] = &[
+    "OPEN",
+    "FIXED_PENDING_REVIEW",
+    "CLOSED",
+    "ACCEPTED",
+    "DEFERRED",
+];
 pub const VALID_FINAL_VERDICTS: &[&str] = &["GO", "NO_GO", "GO_WITH_ACCEPTED_RESIDUAL_RISKS"];
 
 fn default_pending() -> String {
@@ -79,10 +92,7 @@ pub struct RunPlan {
 
 /// Mirror of `models.open_findings`: findings in the given severities that are not
 /// in a terminal status (CLOSED/ACCEPTED), excluding DEFERRED LOW.
-pub fn open_findings<'a>(
-    findings: &'a [Finding],
-    severities: Option<&[&str]>,
-) -> Vec<&'a Finding> {
+pub fn open_findings<'a>(findings: &'a [Finding], severities: Option<&[&str]>) -> Vec<&'a Finding> {
     let sevs = severities.unwrap_or(VALID_SEVERITIES);
     findings
         .iter()
@@ -93,7 +103,7 @@ pub fn open_findings<'a>(
 }
 
 /// Mirror of `models.invalid_findings`.
-pub fn invalid_findings<'a>(findings: &'a [Finding]) -> Vec<&'a Finding> {
+pub fn invalid_findings(findings: &[Finding]) -> Vec<&Finding> {
     findings
         .iter()
         .filter(|f| {

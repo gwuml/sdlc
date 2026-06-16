@@ -1,0 +1,66 @@
+# CI test gate — runs on every PR and push to main. This is the merge gate that was
+# missing (only release.yml existed): broken commits should fail here before merge.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+      - name: Unit + parity tests
+        run: python -m unittest discover -s tests -v
+      - name: Self-validate repo structure
+        run: python -m sdlc validate
+
+  rust:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        run: |
+          ver="$(grep -E '^channel' rust-toolchain.toml | sed -E 's/.*"(.*)".*/\1/')"
+          rustup toolchain install "$ver"
+          rustup component add rustfmt clippy
+      - name: Build + test
+        run: cargo test
+      - name: Format check
+        run: cargo fmt --check
+      - name: Clippy (no warnings)
+        run: cargo clippy -- -D warnings
+
+  secrets-scan:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: detect-secrets scan (memory store + tree)
+        run: |
+          python -m pip install --upgrade pip detect-secrets
+          # Fail the build if a high-entropy secret is committed anywhere tracked.
+          detect-secrets scan --all-files > /tmp/secrets.json
+          python - <<'PY'
+          import json, sys
+          d = json.load(open("/tmp/secrets.json"))
+          hits = {f: v for f, v in d.get("results", {}).items()}
+          if hits:
+              print("::error::detect-secrets found candidate secrets:", list(hits))
+              sys.exit(1)
+          print("detect-secrets: clean")
+          PY

@@ -55,7 +55,10 @@ fn rust_pipeline_matches_python_default_gates() {
 
     // 1. The embedded copy must equal the Python oracle value-for-value.
     let embedded: Value = serde_json::from_str(&embedded_raw).unwrap();
-    assert_eq!(embedded, oracle, "src/default_gates.json drifted from Python oracle");
+    assert_eq!(
+        embedded, oracle,
+        "src/default_gates.json drifted from Python oracle"
+    );
 
     // 2. The typed Rust struct must round-trip every gate with no value drift.
     let gates: Vec<GateDefinition> = serde_json::from_str(&embedded_raw).unwrap();

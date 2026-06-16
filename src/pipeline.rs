@@ -47,8 +47,7 @@ const DEFAULT_GATES_JSON: &str = include_str!("default_gates.json");
 
 /// The canonical 25-gate pipeline, in order.
 pub fn default_gates() -> Vec<GateDefinition> {
-    serde_json::from_str(DEFAULT_GATES_JSON)
-        .expect("embedded default_gates.json must deserialize")
+    serde_json::from_str(DEFAULT_GATES_JSON).expect("embedded default_gates.json must deserialize")
 }
 
 #[cfg(test)]
@@ -75,7 +74,9 @@ mod tests {
         let gates = default_gates();
         let by_id = |id: &str| gates.iter().find(|g| g.id == id).unwrap().clone();
         assert_eq!(
-            by_id("ui_architecture_accessibility").conditional_on.as_deref(),
+            by_id("ui_architecture_accessibility")
+                .conditional_on
+                .as_deref(),
             Some("has_ui")
         );
         assert_eq!(
