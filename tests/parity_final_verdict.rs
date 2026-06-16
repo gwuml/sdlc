@@ -26,9 +26,10 @@ fn manifest(rel: &str) -> PathBuf {
 
 #[test]
 fn final_verdict_matches_python_oracle_for_every_fixture() {
-    let oracle: BTreeMap<String, String> =
-        serde_json::from_str(&fs::read_to_string(manifest("tests/parity/final_verdicts.json")).unwrap())
-            .unwrap();
+    let oracle: BTreeMap<String, String> = serde_json::from_str(
+        &fs::read_to_string(manifest("tests/parity/final_verdicts.json")).unwrap(),
+    )
+    .unwrap();
 
     let runs_dir = manifest("tests/fixtures/runs"); // self-contained; clean-clone safe
     let mut checked = 0;
@@ -43,8 +44,7 @@ fn final_verdict_matches_python_oracle_for_every_fixture() {
             continue;
         };
 
-        let plan: RunPlan =
-            serde_json::from_str(&fs::read_to_string(&plan_path).unwrap()).unwrap();
+        let plan: RunPlan = serde_json::from_str(&fs::read_to_string(&plan_path).unwrap()).unwrap();
         let findings: Vec<Finding> = {
             let fp = dir.join("findings.json");
             if fp.exists() {

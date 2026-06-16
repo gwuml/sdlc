@@ -1,0 +1,87 @@
+# Reusable GitHub Action: run the Secure-SDLC control plane in any repo's CI.
+# Usage in a consumer workflow:
+#
+#   - uses: gwuml/sdlc@v0.2.0
+#     with:
+#       feature: "add OAuth login with audit logging"
+#       risk: auto
+#       fail-on-no-go: "false"   # advisory by default; set true to gate the build
+#
+name: "Secure SDLC control plane"
+description: "Plan a gated, evidence-driven SDLC run, advance deterministic/advisory gates, and emit status + report."
+branding:
+  icon: "shield"
+  color: "purple"
+
+inputs:
+  feature:
+    description: "Feature request to plan a run for."
+    required: true
+  risk:
+    description: "Risk level: auto|low|medium|high|extreme."
+    required: false
+    default: "auto"
+  run-id:
+    description: "Optional explicit run id."
+    required: false
+    default: ""
+  scan:
+    description: "Run security scanners (bandit/detect-secrets/...)."
+    required: false
+    default: "true"
+  fail-on-no-go:
+    description: "Fail the job if the release verdict is NO_GO. Advisory (false) by default."
+    required: false
+    default: "false"
+  version:
+    description: "Version spec to install from PyPI (e.g. ==0.2.0). Empty installs latest."
+    required: false
+    default: ""
+
+outputs:
+  run-id:
+    description: "The run id that was planned."
+    value: ${{ steps.plan.outputs.run_id }}
+  verdict:
+    description: "The release verdict (GO / NO_GO / GO_WITH_ACCEPTED_RESIDUAL_RISKS-ish)."
+    value: ${{ steps.verdict.outputs.verdict }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install sdlc-control-plane
+      shell: bash
+      run: python -m pip install --upgrade "sdlc-control-plane${{ inputs.version }}"
+    - name: Init
+      shell: bash
+      run: python -m sdlc init
+    - name: Plan
+      id: plan
+      shell: bash
+      run: |
+        rid="${{ inputs.run-id }}"
+        out=$(python -m sdlc plan "${{ inputs.feature }}" --risk "${{ inputs.risk }}" ${rid:+--run-id "$rid"})
+        echo "$out"
+        rid=$(echo "$out" | sed -n 's/^Created run: //p')
+        echo "run_id=$rid" >> "$GITHUB_OUTPUT"
+    - name: Run gates
+      shell: bash
+      run: python -m sdlc run "${{ steps.plan.outputs.run_id }}"
+    - name: Scan
+      if: inputs.scan == 'true'
+      shell: bash
+      run: python -m sdlc scan "${{ steps.plan.outputs.run_id }}" || true
+    - name: Status + verdict
+      id: verdict
+      shell: bash
+      run: |
+        python -m sdlc status "${{ steps.plan.outputs.run_id }}"
+        if python -m sdlc validate --run-id "${{ steps.plan.outputs.run_id }}" --release; then
+          echo "verdict=GO" >> "$GITHUB_OUTPUT"
+        else
+          echo "verdict=NO_GO" >> "$GITHUB_OUTPUT"
+          if [ "${{ inputs.fail-on-no-go }}" = "true" ]; then exit 1; fi
+        fi
+    - name: Report
+      shell: bash
+      run: python -m sdlc report "${{ steps.plan.outputs.run_id }}" --print || true

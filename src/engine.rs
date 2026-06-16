@@ -72,9 +72,9 @@ pub fn final_verdict(findings: &[Finding], plan: Option<&RunPlan>) -> String {
     // a CRITICAL or HIGH finding may NEVER be accepted/deferred into a positive
     // verdict. It must be RESOLVED (CLOSED with evidence). Any CRITICAL/HIGH that
     // is not CLOSED — including ACCEPTED or DEFERRED — blocks the release.
-    let critical_high_not_closed = findings.iter().any(|f| {
-        matches!(f.severity.as_str(), "CRITICAL" | "HIGH") && f.status != "CLOSED"
-    });
+    let critical_high_not_closed = findings
+        .iter()
+        .any(|f| matches!(f.severity.as_str(), "CRITICAL" | "HIGH") && f.status != "CLOSED");
     if critical_high_not_closed {
         return "NO_GO".into();
     }
@@ -85,9 +85,9 @@ pub fn final_verdict(findings: &[Finding], plan: Option<&RunPlan>) -> String {
     }
 
     // Only MEDIUM (and lower) may be accepted/deferred as residual risk.
-    let medium_accepted_or_deferred = findings.iter().any(|f| {
-        matches!(f.status.as_str(), "ACCEPTED" | "DEFERRED") && f.severity == "MEDIUM"
-    });
+    let medium_accepted_or_deferred = findings
+        .iter()
+        .any(|f| matches!(f.status.as_str(), "ACCEPTED" | "DEFERRED") && f.severity == "MEDIUM");
     if medium_accepted_or_deferred {
         return "GO_WITH_ACCEPTED_RESIDUAL_RISKS".into();
     }

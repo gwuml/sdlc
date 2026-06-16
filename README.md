@@ -28,6 +28,25 @@ feature request
 - Not a tool that blindly lets agents mutate production.
 - Not a direct-main-push machine.
 
+## Trust & provenance
+
+Every release is **Sigstore-signed** (keyless, logged to Rekor) and ships a **CycloneDX
+SBOM**; verify before installing (`cosign verify-blob` + `sha256sum -c` — see
+[docs/USAGE.md](docs/USAGE.md)). The tool keeps a **tamper-evident evidence ledger**,
+enforces **claim discipline** (no unsupported "production-ready/100x" claims), and an
+independent brutal **red-team audit returned GO** on a clean clone (see
+[docs/EVIDENCE.md](docs/EVIDENCE.md) and [docs/SESSION_AUDIT_PROMPT.md](docs/SESSION_AUDIT_PROMPT.md)).
+Tests gate every PR (`.github/workflows/ci.yml`). Licensed under
+[Apache-2.0](LICENSE).
+
+## Install
+
+- **From a verified release (recommended):** download the wheel + signature from the
+  [releases page](https://github.com/gwuml/sdlc/releases), verify, and `pip install` —
+  full steps in **[docs/USAGE.md](docs/USAGE.md)**, which also has **25 worked use cases**.
+- **From source:** see "Install locally" below.
+- **In CI:** use the reusable action — `uses: gwuml/sdlc@v0.2.0` (see [action.yml](action.yml)).
+
 ## Install locally
 
 Use an isolated environment. On macOS/Homebrew Python and many Linux distributions,
