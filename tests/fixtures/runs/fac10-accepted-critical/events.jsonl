@@ -1,0 +1,2 @@
+{"event": "run.created", "run_id": "fac10-accepted-critical", "ts": "2026-06-15T00:00:00+00:00"}
+{"event": "git.branch_created", "run_id": "fac10-accepted-critical", "branch": "sdlc/fac10-accepted-critical", "ts": "2026-06-15T00:01:00+00:00"}

@@ -1,0 +1,16 @@
+[
+  {
+    "closed_by": null,
+    "closure_evidence": [],
+    "evidence": [
+      "plan.gates.implementation.verdict != GO"
+    ],
+    "id": "HIGH-001",
+    "impact": "Cannot prove the requested feature was implemented or bounded to approved write paths.",
+    "owner": "agent_3_implementation_owner",
+    "required_fix": "Run the implementation worker under constrained permissions, capture code diff, and re-run focused validation.",
+    "severity": "HIGH",
+    "status": "OPEN",
+    "title": "Implementation gate has no accepted code-diff evidence"
+  }
+]

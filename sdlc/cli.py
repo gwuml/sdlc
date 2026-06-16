@@ -3891,6 +3891,9 @@ def command_finding(args: argparse.Namespace) -> int:
         if finding.severity in {"CRITICAL", "HIGH"} and not args.human_override:
             eprint("CRITICAL/HIGH findings cannot be accepted or deferred without --human-override")
             return 3
+        # FAC-10: even a human-accepted/deferred CRITICAL/HIGH can be RECORDED for
+        # tracking, but final_verdict() will never let it reach a shippable verdict —
+        # the run stays NO_GO until the finding is fixed and CLOSED with evidence.
         if not args.reason:
             eprint("--reason is required")
             return 2
@@ -5435,17 +5438,46 @@ def command_bench(args: argparse.Namespace) -> int:
     repo = Path(args.repo).resolve()
     bench_dir = repo / "artifacts" / "bench"
 
+    # Reproducibility: if there are no live runs (e.g. a fresh clone — .sdlc/runs is
+    # gitignored), fall back to the committed reference corpus (tests/fixtures/runs) so
+    # the headline is deterministic and reproducible anywhere, not dependent on whatever
+    # runs happen to be present. corpus_source records which was used.
+    import shutil as _shutil
+    import tempfile as _tempfile
+    live_runs = repo / ".sdlc" / "runs"
+    reference = repo / "tests" / "fixtures" / "runs"
+    has_live = live_runs.is_dir() and any((p / "plan.json").exists() for p in live_runs.iterdir())
+    _tmp_corpus = None
+    if has_live:
+        corpus_repo = repo
+        corpus_source = "live:.sdlc/runs"
+    elif reference.is_dir() and any((p / "plan.json").exists() for p in reference.iterdir()):
+        _tmp_corpus = _tempfile.TemporaryDirectory()
+        seeded = Path(_tmp_corpus.name) / ".sdlc" / "runs"
+        seeded.mkdir(parents=True)
+        for run in reference.iterdir():
+            if run.is_dir():
+                _shutil.copytree(run, seeded / run.name)
+        corpus_repo = Path(_tmp_corpus.name)
+        corpus_source = "reference:tests/fixtures/runs"
+    else:
+        corpus_repo = repo
+        corpus_source = "empty"
+
     def readiness_fn(run_id: str) -> dict[str, object]:
-        store = RunStore(repo)
+        store = RunStore(corpus_repo)
         plan = store.load_plan(run_id)
         findings = store.load_findings(run_id)
-        return _release_readiness_payload(repo, plan, findings)
+        return _release_readiness_payload(corpus_repo, plan, findings)
 
     if args.bench_command == "run":
-        result = bench_mod.measure(repo, readiness_fn)
+        result = bench_mod.measure(corpus_repo, readiness_fn)
+        result["corpus_source"] = corpus_source
+        comparative = bench_mod.comparative_blocker_identification(corpus_repo)
+        if _tmp_corpus is not None:
+            _tmp_corpus.cleanup()
         if not args.no_write:
             bench_dir.mkdir(parents=True, exist_ok=True)
-            comparative = bench_mod.comparative_blocker_identification(repo)
             write_json(bench_dir / "after.json", result)
             write_json(bench_dir / "comparative.json", comparative)
             (bench_dir / "report.md").write_text(bench_mod.report_markdown(result), encoding="utf-8")
@@ -5454,10 +5486,18 @@ def command_bench(args: argparse.Namespace) -> int:
         if args.json:
             print(json.dumps(result, indent=2, sort_keys=True))
         else:
-            print(f"Benchmark: {result['measured_dimensions']}/{result['total_dimensions']} dimensions measured "
-                  f"across {result['runs_evaluated']} runs; overall score={result['overall_score']}")
+            headline_dims = result.get("headline_dimensions", [])
+            print(f"Headline (CORPUS only, corpus-relative): {result.get('headline_score')} "
+                  f"from {len(headline_dims)}/{result['total_dimensions']} dimensions "
+                  f"across {result['runs_evaluated']} runs.")
+            print("Other dimensions are reported but excluded from the headline (see kind):")
             for key, dim in result["dimensions"].items():
-                mark = dim["score"] if dim["status"] == "MEASURED" else "UNAVAILABLE"
+                if dim["status"] != "MEASURED":
+                    mark = "UNAVAILABLE"
+                else:
+                    kind = dim.get("kind", "?")
+                    flag = "*" if kind == result.get("headline_kind") else " "
+                    mark = f"{dim['score']:<6}{flag}{kind}"
                 print(f"  {key:<32} {mark}")
         return 0
 
@@ -5543,6 +5583,13 @@ def command_validate(args: argparse.Namespace) -> int:
             prompt = store.run_dir(args.run_id) / "prompts" / "execution_prompt.md"
             if not prompt.exists():
                 errors.append("Run prompt missing")
+            # Detect ledger tampering in EVERY non-release mode (default AND
+            # --structural-only): a broken canonical hash-chain is a defect regardless
+            # of validation intent. require_origin=False so a legitimately unsigned
+            # local ledger is not rejected, while a byte-tamper still fails. The
+            # --release lane runs its own stricter (origin-required) check.
+            if not args.release:
+                errors.extend(_ledger_integrity_errors(store.run_dir(args.run_id), require_origin=False))
             if not args.release and not args.structural_only:
                 findings = store.load_findings(args.run_id)
                 blocked_gates = [

@@ -25,9 +25,22 @@ from .engine import RunStore, final_verdict
 
 # --- dimension result helpers -------------------------------------------------
 
-def _measured(value: Any, score: float, unit: str, detail: str) -> dict[str, Any]:
+# Dimension kinds, honest about what each score actually reflects:
+#   CORPUS       — observed over the real run corpus (counts toward the headline)
+#   CAPABILITY   — a real but synthetic exercise of a mechanism (not headline)
+#   CONFIG       — a policy/config check, not runtime behavior (not headline)
+#   CONSISTENCY  — true largely by construction / tautological (not headline)
+#   ENVIRONMENT  — machine-state dependent, e.g. PATH (not headline)
+#   ATTESTATION  — depends on an external/human attestation (not headline)
+# Only CORPUS dimensions are averaged into the headline, because the others are
+# near-constant, environment-specific, or definitional and would inflate it.
+HEADLINE_KIND = "CORPUS"
+
+
+def _measured(value: Any, score: float, unit: str, detail: str, kind: str = "CORPUS") -> dict[str, Any]:
     return {
         "status": "MEASURED",
+        "kind": kind,
         "value": value,
         "score": round(max(0.0, min(100.0, score)), 1),
         "unit": unit,
@@ -36,7 +49,7 @@ def _measured(value: Any, score: float, unit: str, detail: str) -> dict[str, Any
 
 
 def _unavailable(reason: str) -> dict[str, Any]:
-    return {"status": "UNAVAILABLE", "value": None, "score": None, "unit": None, "detail": reason}
+    return {"status": "UNAVAILABLE", "kind": "UNAVAILABLE", "value": None, "score": None, "unit": None, "detail": reason}
 
 
 def _list_runs(repo: Path) -> list[str]:
@@ -79,7 +92,8 @@ def _dim_setup_friction(repo: Path) -> dict[str, Any]:
     # <300s target -> 100; degrade to 0 at 600s (spec allows revision to <=600).
     score = 100.0 if elapsed <= 300 else max(0.0, 100.0 * (600 - elapsed) / 300)
     return _measured(round(elapsed, 3), score, "seconds",
-                     f"Cold `init` + first `plan` completed in {elapsed:.2f}s (target <300s).")
+                     f"Cold `init` + first `plan` completed in {elapsed:.2f}s (target <300s).",
+                     kind="CAPABILITY")
 
 
 def _dim_blocker_visibility(repo: Path, readiness_fn: Callable[[str], dict[str, Any]], runs: list[str]) -> dict[str, Any]:
@@ -157,7 +171,8 @@ def _dim_redteam_independence(repo: Path, runs: list[str]) -> dict[str, Any]:
         return _unavailable("No HIGH/EXTREME runs to assess cross-model independence.")
     pct = 100.0 * independent / high
     return _measured(round(pct, 1), pct, "percent",
-                     f"{independent}/{high} HIGH/EXTREME runs assign a red-team worker distinct from the implementer.")
+                     f"{independent}/{high} HIGH/EXTREME runs assign a red-team worker distinct from the implementer.",
+                     kind="CONFIG")
 
 
 def _dim_resume_recovery(repo: Path) -> dict[str, Any]:
@@ -198,7 +213,8 @@ def _dim_resume_recovery(repo: Path) -> dict[str, Any]:
             preserved = sum(1 for gid, sv in completed.items() if second.get(gid) == sv)
             pct = 100.0 * preserved / len(completed)
             return _measured(round(pct, 1), pct, "percent",
-                             f"{preserved}/{len(completed)} completed gates preserved across a resume re-run.")
+                             f"{preserved}/{len(completed)} completed gates preserved across a resume re-run.",
+                             kind="CAPABILITY")
     except Exception as exc:  # noqa: BLE001
         return _unavailable(f"Resume measurement error: {exc}")
 
@@ -237,35 +253,27 @@ def _dim_release_accuracy(repo: Path, readiness_fn: Callable[[str], dict[str, An
         return _unavailable("No runs to assess.")
     pct = 100.0 * correct / len(runs)
     return _measured(round(pct, 1), pct, "percent",
-                     f"{correct}/{len(runs)} runs: release verdict is consistent with blocker presence.")
+                     f"{correct}/{len(runs)} runs: release verdict is consistent with blocker presence.",
+                     kind="CONSISTENCY")
 
 
 def _dim_tui_completion(repo: Path) -> dict[str, Any]:
-    # Spec FAC 8/22: scored only via an independent reviewer (not the builder).
-    # A signed attestation in artifacts/bench/tui_review.json is the accepted
-    # evidence. Without it, UNAVAILABLE — never self-scored.
+    # Spec FAC 8/22 requires an INDEPENDENT reviewer (not the builder). There is no
+    # implemented mechanism to verify reviewer independence in-process (a JSON field
+    # or a string can be self-populated by the builder), so this dimension is NEVER
+    # auto-scored — it is UNAVAILABLE by design. Any operator attestation in
+    # artifacts/bench/tui_review.json is recorded as context only and is deliberately
+    # NOT converted into a score, removing any path for a self-asserted number to leak
+    # into a report. Crediting it would require a future verifier that checks the
+    # reviewer's git/OIDC identity differs from the builder's.
     review_path = repo / "artifacts" / "bench" / "tui_review.json"
-    if not review_path.exists():
-        return _unavailable("No independent TUI review on file (artifacts/bench/tui_review.json). "
-                            "Spec requires a reviewer who did not build the TUI.")
-    try:
-        review = _json_load(review_path)
-    except Exception as exc:  # noqa: BLE001
-        return _unavailable(f"TUI review record unreadable: {exc}")
-    if review.get("is_builder") is not False or review.get("verdict") != "APPROVED":
-        return _unavailable("TUI review is not an independent APPROVED attestation.")
-    confirmed = review.get("tasks_confirmed")
-    if isinstance(confirmed, int):
-        pct = 100.0 * confirmed / 10
-        detail = f"Independent reviewer confirmed {confirmed}/10 tasks without docs."
-    else:
-        # Holistic approval, not a per-task count: credit the spec pass threshold
-        # (8/10) conservatively rather than claiming 100 without per-task data.
-        pct = 80.0
-        detail = ("Independent reviewer (not the builder) attested APPROVED "
-                  f"('{review.get('attestation','')}'); holistic sign-off credited at the "
-                  "8/10 spec threshold (per-task rubric would refine this).")
-    return _measured(round(pct, 1), pct, "percent", detail)
+    recorded = review_path.exists()
+    return _unavailable(
+        "TUI task completion is not auto-scored: independent-reviewer verification is not "
+        "implemented, so it cannot be trusted as a measured score. "
+        + ("An operator attestation is on file (context only, not credited)."
+           if recorded else "No reviewer attestation on file.")
+    )
 
 
 def _json_load(path: Path) -> Any:
@@ -277,7 +285,8 @@ def _dim_provider_flexibility(repo: Path) -> dict[str, Any]:
     available = [cli for cli in WORKER_CLIS if shutil.which(cli)]
     score = min(100.0, 100.0 * len(available) / 3)  # target >= 3 families
     return _measured(len(available), score, "worker-families",
-                     f"Worker CLIs on PATH: {available or ['<none>']} (target >= 3).")
+                     f"Worker CLIs on PATH: {available or ['<none>']} (target >= 3).",
+                     kind="ENVIRONMENT")
 
 
 def _dim_cost_visibility(repo: Path) -> dict[str, Any]:
@@ -316,7 +325,9 @@ def _dim_cost_visibility(repo: Path) -> dict[str, Any]:
               "representative provider outputs (anthropic/openai/gemini + no-usage).")
     if real_total:
         detail += f" Real executed worker runs surfacing usage: {real_surfaced}/{real_total}."
-    return _measured(round(pct, 1), pct, "percent", detail)
+    else:
+        detail += " No executed worker runs in corpus — this scores the extractor mechanism, not real coverage."
+    return _measured(round(pct, 1), pct, "percent", detail, kind="CAPABILITY")
 
 
 def _dim_github_provenance(repo: Path, runs: list[str]) -> dict[str, Any]:
@@ -360,13 +371,31 @@ def measure(repo: Path, readiness_fn: Callable[[str], dict[str, Any]]) -> dict[s
         "12_github_pr_provenance": _dim_github_provenance(repo, runs),
     }
     measured = [d for d in dimensions.values() if d["status"] == "MEASURED"]
-    overall = round(sum(d["score"] for d in measured) / len(measured), 1) if measured else None
+    # The headline averages ONLY corpus-observed dimensions. CAPABILITY / CONFIG /
+    # CONSISTENCY / ENVIRONMENT / ATTESTATION dimensions are near-constant,
+    # environment-specific, or definitional, so counting them would inflate the
+    # number (the brutal-audit H1/H4 finding). They are reported separately.
+    corpus = [d for d in measured if d.get("kind") == HEADLINE_KIND]
+    headline = round(sum(d["score"] for d in corpus) / len(corpus), 1) if corpus else None
+    kind_breakdown: dict[str, list[str]] = {}
+    for key, dim in dimensions.items():
+        kind_breakdown.setdefault(dim.get("kind", "UNAVAILABLE"), []).append(key)
     return {
-        "schema": "sdlc.bench.result/v1",
+        "schema": "sdlc.bench.result/v2",
         "runs_evaluated": len(runs),
         "measured_dimensions": len(measured),
         "total_dimensions": len(dimensions),
-        "overall_score": overall,
+        "headline_kind": HEADLINE_KIND,
+        "headline_score": headline,
+        "headline_dimensions": [k for k, d in dimensions.items() if d.get("kind") == HEADLINE_KIND],
+        "kind_breakdown": kind_breakdown,
+        "corpus_relative": True,
+        "note": "headline_score is the mean of CORPUS dimensions only and is relative to "
+                "the evaluated run corpus; it is not an absolute tool-quality constant. "
+                "Other dimensions are reported by kind (CAPABILITY/CONFIG/CONSISTENCY/"
+                "ENVIRONMENT/ATTESTATION) and excluded from the headline.",
+        # Back-compat: keep overall_score as an alias of the honest headline.
+        "overall_score": headline,
         "dimensions": dimensions,
     }
 
@@ -537,28 +566,37 @@ def comparison_matrix_markdown(result: dict[str, Any], comparative: dict[str, An
 
 
 def report_markdown(result: dict[str, Any]) -> str:
+    headline = result.get("headline_score", result.get("overall_score"))
+    headline_dims = result.get("headline_dimensions", [])
     lines = [
         "# Benchmark Report",
         "",
         f"Runs evaluated: {result['runs_evaluated']}",
         f"Measured dimensions: {result['measured_dimensions']}/{result['total_dimensions']}",
-        f"Overall score (mean of measured): {result['overall_score']}",
+        f"**Headline score (CORPUS dimensions only): {headline}** — corpus-relative, "
+        "not an absolute tool-quality constant.",
+        f"Headline dimensions: {', '.join(headline_dims) or '—'}",
         "",
         "## Claim discipline",
         "",
-        "100x superiority was not proven. Dimensions without measurement are marked",
-        "UNAVAILABLE, not scored.",
+        "100x superiority was not proven. The headline averages only CORPUS dimensions",
+        "(observed over the real run corpus). CAPABILITY / CONFIG / CONSISTENCY /",
+        "ENVIRONMENT / ATTESTATION dimensions are reported but EXCLUDED from the headline",
+        "because they are near-constant, environment-specific, definitional, or",
+        "self-attested and would inflate it. Unmeasured dimensions are UNAVAILABLE.",
         "",
         "## Dimensions",
         "",
-        "| # | Dimension | Status | Value | Score | Detail |",
-        "|---|-----------|--------|-------|-------|--------|",
+        "| # | Dimension | Status | Kind | Value | Score | In headline? | Detail |",
+        "|---|-----------|--------|------|-------|-------|--------------|--------|",
     ]
     for key, dim in result["dimensions"].items():
         num, name = key.split("_", 1)
         val = dim["value"] if dim["value"] is not None else "—"
         score = dim["score"] if dim["score"] is not None else "—"
+        kind = dim.get("kind", "—")
+        in_headline = "yes" if kind == result.get("headline_kind", "CORPUS") and dim["status"] == "MEASURED" else "no"
         detail = dim["detail"].replace("|", "\\|")
-        lines.append(f"| {num} | {name} | {dim['status']} | {val} | {score} | {detail} |")
+        lines.append(f"| {num} | {name} | {dim['status']} | {kind} | {val} | {score} | {in_headline} | {detail} |")
     lines.append("")
     return "\n".join(lines)

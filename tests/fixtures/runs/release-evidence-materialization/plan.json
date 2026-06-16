@@ -1,0 +1,438 @@
+{
+  "agents": [
+    {
+      "id": "agent_1_pm_coordinator",
+      "role": "PM/coordinator, scope control, dependency graph, GO/NO-GO calls"
+    },
+    {
+      "id": "agent_2_architecture_contracts",
+      "role": "Architecture, contracts, invariants, tradeoffs"
+    },
+    {
+      "id": "agent_3_implementation_owner",
+      "role": "Implementation owner for constrained code changes"
+    },
+    {
+      "id": "agent_4_evidence_reporting_owner",
+      "role": "Evidence, data, replay, traceability, final reporting"
+    },
+    {
+      "id": "agent_5_qa_validation_owner",
+      "role": "QA, focused tests, fixtures, integration, smoke validation"
+    },
+    {
+      "id": "agent_6_redteam_deploy_rollback",
+      "role": "Brutal red-team, deploy lock, rollback, post-deploy verification"
+    },
+    {
+      "id": "agent_8_cybersecurity_engineer",
+      "role": "Cybersecurity, privacy, abuse cases, threat model, prompt injection"
+    }
+  ],
+  "branch": "sdlc/enable-12-agent-parallelism",
+  "classification": {
+    "activated_agents": [
+      {
+        "id": "agent_1_pm_coordinator",
+        "role": "PM/coordinator, scope control, dependency graph, GO/NO-GO calls"
+      },
+      {
+        "id": "agent_2_architecture_contracts",
+        "role": "Architecture, contracts, invariants, tradeoffs"
+      },
+      {
+        "id": "agent_3_implementation_owner",
+        "role": "Implementation owner for constrained code changes"
+      },
+      {
+        "id": "agent_4_evidence_reporting_owner",
+        "role": "Evidence, data, replay, traceability, final reporting"
+      },
+      {
+        "id": "agent_5_qa_validation_owner",
+        "role": "QA, focused tests, fixtures, integration, smoke validation"
+      },
+      {
+        "id": "agent_6_redteam_deploy_rollback",
+        "role": "Brutal red-team, deploy lock, rollback, post-deploy verification"
+      },
+      {
+        "id": "agent_8_cybersecurity_engineer",
+        "role": "Cybersecurity, privacy, abuse cases, threat model, prompt injection"
+      }
+    ],
+    "has_data_or_evidence": true,
+    "has_infra": false,
+    "has_security": true,
+    "has_ui": false,
+    "high_stakes": true,
+    "reasons": [
+      "Security-sensitive feature or authorization surface detected",
+      "Data/evidence/reporting surface detected",
+      "High-stakes blast radius detected; claim discipline and brutal red-team are mandatory",
+      "Risk explicitly set by user: HIGH"
+    ],
+    "risk_level": "HIGH"
+  },
+  "created_at": "2026-05-26T22:21:10-04:00",
+  "direct_main_push_allowed": false,
+  "feature": "Materialize release-grade gate evidence automatically",
+  "gates": [
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/intake_scope.md",
+        ".sdlc/runs/release-evidence-materialization/artifacts/gates/intake_scope-evidence.json"
+      ],
+      "id": "intake_scope",
+      "notes": "Release-grade typed evidence materialized by the SDLC control plane.",
+      "order": 1,
+      "owner": "agent_1_pm_coordinator",
+      "state": "GO",
+      "title": "Intake, scope, and ambiguity reduction",
+      "verdict": "GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/stakeholders_raci.md",
+        ".sdlc/runs/release-evidence-materialization/artifacts/gates/stakeholders_raci-evidence.json"
+      ],
+      "id": "stakeholders_raci",
+      "notes": "Release-grade typed evidence materialized by the SDLC control plane.",
+      "order": 2,
+      "owner": "agent_1_pm_coordinator",
+      "state": "GO",
+      "title": "Stakeholders, RACI, and approval authority",
+      "verdict": "GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/mission_non_goals.md",
+        ".sdlc/runs/release-evidence-materialization/artifacts/gates/mission_non_goals-evidence.json"
+      ],
+      "id": "mission_non_goals",
+      "notes": "Release-grade typed evidence materialized by the SDLC control plane.",
+      "order": 3,
+      "owner": "agent_1_pm_coordinator",
+      "state": "GO",
+      "title": "Mission, non-goals, and claim discipline",
+      "verdict": "GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/repo_context_env_branch.md",
+        ".sdlc/runs/release-evidence-materialization/artifacts/gates/repo_context_env_branch-evidence.json"
+      ],
+      "id": "repo_context_env_branch",
+      "notes": "Release-grade typed evidence materialized by the SDLC control plane.",
+      "order": 4,
+      "owner": "agent_1_pm_coordinator",
+      "state": "GO",
+      "title": "Repo, production, branch, and environment context",
+      "verdict": "GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/risk_blast_radius.md",
+        ".sdlc/runs/release-evidence-materialization/artifacts/gates/risk_blast_radius-evidence.json"
+      ],
+      "id": "risk_blast_radius",
+      "notes": "Release-grade typed evidence materialized by the SDLC control plane.",
+      "order": 5,
+      "owner": "agent_1_pm_coordinator",
+      "state": "GO",
+      "title": "Risk classification and blast-radius controls",
+      "verdict": "GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/data_privacy_secrets.md",
+        ".sdlc/runs/release-evidence-materialization/artifacts/gates/data_privacy_secrets-evidence.json"
+      ],
+      "id": "data_privacy_secrets",
+      "notes": "Release-grade typed evidence materialized by the SDLC control plane.",
+      "order": 6,
+      "owner": "agent_8_cybersecurity_engineer",
+      "state": "GO",
+      "title": "Data, privacy, secrets, and exfiltration policy",
+      "verdict": "GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/baseline_freeze.md",
+        ".sdlc/runs/release-evidence-materialization/artifacts/gates/baseline_freeze-evidence.json"
+      ],
+      "id": "baseline_freeze",
+      "notes": "Release-grade typed evidence materialized by the SDLC control plane.",
+      "order": 7,
+      "owner": "agent_1_pm_coordinator",
+      "state": "GO",
+      "title": "Baseline/freeze gate and reproducibility snapshot",
+      "verdict": "GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/supply_chain_sbom.md",
+        ".sdlc/runs/release-evidence-materialization/artifacts/gates/supply_chain_sbom-evidence.json"
+      ],
+      "id": "supply_chain_sbom",
+      "notes": "Release-grade typed evidence materialized by the SDLC control plane.",
+      "order": 8,
+      "owner": "agent_8_cybersecurity_engineer",
+      "state": "GO",
+      "title": "Supply-chain, dependency, SBOM, and license review",
+      "verdict": "GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/agent_plan_permissions.md",
+        ".sdlc/runs/release-evidence-materialization/artifacts/gates/agent_plan_permissions-evidence.json"
+      ],
+      "id": "agent_plan_permissions",
+      "notes": "Release-grade typed evidence materialized by the SDLC control plane.",
+      "order": 9,
+      "owner": "agent_1_pm_coordinator",
+      "state": "GO",
+      "title": "Agent plan, dependency graph, write ownership, and permissions",
+      "verdict": "GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/architecture_contracts.md",
+        ".sdlc/runs/release-evidence-materialization/artifacts/gates/architecture_contracts-evidence.json"
+      ],
+      "id": "architecture_contracts",
+      "notes": "Release-grade typed evidence materialized by the SDLC control plane.",
+      "order": 10,
+      "owner": "agent_2_architecture_contracts",
+      "state": "GO",
+      "title": "Architecture, contracts, invariants, and failure modes",
+      "verdict": "GO"
+    },
+    {
+      "conditional_on": "has_ui",
+      "evidence": [],
+      "id": "ui_architecture_accessibility",
+      "notes": "Conditional gate skipped because has_ui=false",
+      "order": 11,
+      "owner": "agent_7_ui_architect",
+      "state": "SKIPPED",
+      "title": "UI architecture, UX states, accessibility, and dark-pattern review",
+      "verdict": "SKIPPED"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/threat_model_abuse_cases.md",
+        ".sdlc/runs/release-evidence-materialization/artifacts/gates/threat_model_abuse_cases-evidence.json"
+      ],
+      "id": "threat_model_abuse_cases",
+      "notes": "Release-grade typed evidence materialized by the SDLC control plane.",
+      "order": 12,
+      "owner": "agent_8_cybersecurity_engineer",
+      "state": "GO",
+      "title": "Threat model, abuse cases, misuse cases, and adversarial assumptions",
+      "verdict": "GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/implementation_plan_changeset.md",
+        ".sdlc/runs/release-evidence-materialization/artifacts/gates/implementation_plan_changeset-evidence.json"
+      ],
+      "id": "implementation_plan_changeset",
+      "notes": "Release-grade typed evidence materialized by the SDLC control plane.",
+      "order": 13,
+      "owner": "agent_3_implementation_owner",
+      "state": "GO",
+      "title": "Implementation plan and minimal change-set contract",
+      "verdict": "GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/implementation.md",
+        ".sdlc/runs/release-evidence-materialization/artifacts/gates/implementation-evidence.json"
+      ],
+      "id": "implementation",
+      "notes": "Release-grade typed evidence materialized by the SDLC control plane.",
+      "order": 14,
+      "owner": "agent_3_implementation_owner",
+      "state": "GO",
+      "title": "Implementation with constrained write ownership",
+      "verdict": "GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/deterministic_quality.md",
+        ".sdlc/runs/release-evidence-materialization/artifacts/gates/deterministic_quality-evidence.json"
+      ],
+      "id": "deterministic_quality",
+      "notes": "Release-grade typed evidence materialized by the SDLC control plane.",
+      "order": 15,
+      "owner": "agent_5_qa_validation_owner",
+      "state": "GO",
+      "title": "Deterministic quality gate: format, lint, typecheck, static checks",
+      "verdict": "GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/qa_tests_integration_smoke.md",
+        ".sdlc/runs/release-evidence-materialization/artifacts/gates/qa_tests_integration_smoke-evidence.json"
+      ],
+      "id": "qa_tests_integration_smoke",
+      "notes": "Release-grade typed evidence materialized by the SDLC control plane.",
+      "order": 16,
+      "owner": "agent_5_qa_validation_owner",
+      "state": "GO",
+      "title": "QA: focused tests, fixtures, integration, regression, and smoke tests",
+      "verdict": "GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/scans/bandit.txt",
+        "artifacts/scans/detect-secrets.txt",
+        "artifacts/scans/pip-audit.txt",
+        "artifacts/scans/checkov.txt",
+        "artifacts/scans/policy.txt",
+        "artifacts/security_scan_summary.md",
+        "artifacts/security_scans.md"
+      ],
+      "id": "security_scans",
+      "notes": "Security scan issues require review: pip-audit=BLOCKED_BY_POLICY",
+      "order": 17,
+      "owner": "agent_8_cybersecurity_engineer",
+      "state": "NO_GO",
+      "title": "Security scans: SAST, dependency, secrets, IaC, and policy checks",
+      "verdict": "NO_GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/observability_runbooks.md",
+        ".sdlc/runs/release-evidence-materialization/artifacts/gates/observability_runbooks-evidence.json"
+      ],
+      "id": "observability_runbooks",
+      "notes": "Blocked because security scans are NO_GO.",
+      "order": 18,
+      "owner": "agent_9_sre_sysadmin",
+      "state": "BLOCKED",
+      "title": "Observability, telemetry, runbooks, and incident response",
+      "verdict": "NO_GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/implementer_self_review.md",
+        ".sdlc/runs/release-evidence-materialization/artifacts/gates/implementer_self_review-evidence.json"
+      ],
+      "id": "implementer_self_review",
+      "notes": "Blocked because security scans are NO_GO.",
+      "order": 19,
+      "owner": "agent_3_implementation_owner",
+      "state": "BLOCKED",
+      "title": "Implementer self-review and claim check",
+      "verdict": "NO_GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/independent_redteam_cross_model.md",
+        "artifacts/redteam_execution_summary.md"
+      ],
+      "id": "independent_redteam_cross_model",
+      "notes": "Executed worker red-team requires --allow-network and policy network_allowed=true.",
+      "order": 20,
+      "owner": "agent_6_redteam_deploy_rollback",
+      "state": "NO_GO",
+      "title": "Independent brutal red-team and cross-model audit",
+      "verdict": "NO_GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/critical_high_fix_loop.md"
+      ],
+      "id": "critical_high_fix_loop",
+      "notes": "Full advisory pass generated evidence, but this gate still needs implementation, worker, human, or release-grade proof before GO.",
+      "order": 21,
+      "owner": "agent_1_pm_coordinator",
+      "state": "FIX_REQUIRED",
+      "title": "CRITICAL/HIGH automatic fix loop and second validation",
+      "verdict": "NO_GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/evidence_traceability_attestations.md"
+      ],
+      "id": "evidence_traceability_attestations",
+      "notes": "Full advisory pass generated evidence, but this gate still needs implementation, worker, human, or release-grade proof before GO.",
+      "order": 22,
+      "owner": "agent_4_evidence_reporting_owner",
+      "state": "FIX_REQUIRED",
+      "title": "Evidence traceability, provenance, and attestations",
+      "verdict": "NO_GO"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/commit_branch_pr_ci.md"
+      ],
+      "id": "commit_branch_pr_ci",
+      "notes": "Full advisory pass generated evidence, but this gate still needs implementation, worker, human, or release-grade proof before GO.",
+      "order": 23,
+      "owner": "agent_1_pm_coordinator",
+      "state": "FIX_REQUIRED",
+      "title": "Commit, branch, PR, and CI gate",
+      "verdict": "NO_GO"
+    },
+    {
+      "conditional_on": "production_rollout_allowed",
+      "evidence": [],
+      "id": "deploy_rollout_postdeploy",
+      "notes": "Conditional gate skipped because production_rollout_allowed=false",
+      "order": 24,
+      "owner": "agent_6_redteam_deploy_rollback",
+      "state": "SKIPPED",
+      "title": "Deployment, rollout, restart, monitoring, and rollback gate",
+      "verdict": "SKIPPED"
+    },
+    {
+      "conditional_on": null,
+      "evidence": [
+        "artifacts/final_report_reaudit.md"
+      ],
+      "id": "final_report_reaudit",
+      "notes": "Full advisory pass generated evidence, but this gate still needs implementation, worker, human, or release-grade proof before GO.",
+      "order": 25,
+      "owner": "agent_4_evidence_reporting_owner",
+      "state": "FIX_REQUIRED",
+      "title": "Final report, residual risks, next audit, and maintenance plan",
+      "verdict": "NO_GO"
+    }
+  ],
+  "policy_profile": "default",
+  "production_rollout_allowed": false,
+  "repo": "/Users/rmallarapu/dev/sdlc-control-plane",
+  "risk_level": "HIGH",
+  "run_id": "release-evidence-materialization",
+  "worker_preferences": {
+    "architecture": "claude",
+    "implementation": "codex",
+    "qa": "codex",
+    "redteam": "openai-codex-primary"
+  }
+}

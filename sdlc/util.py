@@ -16,6 +16,18 @@ from typing import Any
 
 
 SECRET_PATTERNS = [
+    # PEM private-key blocks (RSA/EC/OPENSSH/PKCS8/ENCRYPTED) — the DOTALL match covers
+    # multi-line and base64-wrapped bodies; redact the whole armored block.
+    re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----", re.DOTALL),
+    # PuTTY .ppk private keys: redact the whole key file (header through Private-MAC),
+    # which contains the Private-Lines body. Over-redacts the public portion — safe.
+    re.compile(r"PuTTY-User-Key-File-\d+:.*?Private-MAC:[^\r\n]*", re.DOTALL),
+    # SSH2 (RFC4716) private-key blocks.
+    re.compile(r"---- BEGIN SSH2 ENCRYPTED PRIVATE KEY ----.*?---- END SSH2 ENCRYPTED PRIVATE KEY ----", re.DOTALL),
+    # JWK private-key params (d/p/q/dp/dq/qi/k): a long base64url value keyed by one of
+    # these names is key material regardless of field order. Length>=30 avoids matching
+    # ordinary short fields named d/p/q. Keep the "<param>":" prefix; redact the value.
+    re.compile(r"(\"(?:d|dp|dq|qi|p|q|k)\"\s*:\s*\")[A-Za-z0-9_+/=-]{30,}"),
     re.compile(r"(?i)(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)(\s*[:=]\s*)([^\s\"']+)"),
     re.compile(r"(?i)(bybit[_ -]?(?:api[_ -]?)?(?:key|secret|auth|credential|credentials|token|session|password|passphrase|private[_ -]?key))(\s*[:=]\s*)([^\s\"']+)"),
     re.compile(r"(?i)((?:mango[_-]?)?bybit(?:api)?(?:key|secret|auth|credential|credentials|token|session|password|passphrase|privatekey|apiid|keyid|accessid|accesskey|accesssecret))(\s*[:=]\s*)([^\s\"']+)"),

@@ -2,20 +2,30 @@
 
 from __future__ import annotations
 
+import shutil
+import tempfile
 import unittest
 from pathlib import Path
 
 from sdlc import diff
 
-
-def _repo() -> Path:
-    return Path(__file__).resolve().parent.parent
+FIXTURES = Path(__file__).resolve().parent / "fixtures" / "runs"
 
 
 class QualityDiffTests(unittest.TestCase):
     def setUp(self) -> None:
-        # Two real fixtures that both have plan.json + findings.json.
-        self.result = diff.quality_diff(_repo(), "scanner-evidence-hardening", "product-self-run")
+        # Seed a temp repo from committed fixtures so the test is self-contained and
+        # passes on a clean clone (.sdlc/runs is gitignored and empty there).
+        self._tmp = tempfile.TemporaryDirectory()
+        repo = Path(self._tmp.name)
+        runs = repo / ".sdlc" / "runs"
+        runs.mkdir(parents=True)
+        for name in ("scanner-evidence-hardening", "product-self-run"):
+            shutil.copytree(FIXTURES / name, runs / name)
+        self.result = diff.quality_diff(repo, "scanner-evidence-hardening", "product-self-run")
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
 
     def test_all_twelve_structural_fields_present(self) -> None:
         # FAC 23: the output must contain all 12 named structural fields.

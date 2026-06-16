@@ -2,10 +2,32 @@
 
 from __future__ import annotations
 
+import shutil
+import tempfile
 import unittest
 from pathlib import Path
 
 from sdlc import bench
+
+_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "runs"
+_SEEDED: "tempfile.TemporaryDirectory | None" = None
+
+
+def setUpModule() -> None:
+    # Seed a temp repo from committed fixtures so bench tests are deterministic and
+    # pass on a clean clone (the working repo's .sdlc/runs is gitignored/empty there).
+    global _SEEDED
+    _SEEDED = tempfile.TemporaryDirectory()
+    runs = Path(_SEEDED.name) / ".sdlc" / "runs"
+    runs.mkdir(parents=True)
+    for run in _FIXTURES.iterdir():
+        if run.is_dir():
+            shutil.copytree(run, runs / run.name)
+
+
+def tearDownModule() -> None:
+    if _SEEDED is not None:
+        _SEEDED.cleanup()
 
 
 class BenchHelperTests(unittest.TestCase):
@@ -41,6 +63,16 @@ class BenchHelperTests(unittest.TestCase):
         # No 'better' claim without measuring the other tool.
         self.assertIn("NOT MEASURED", md)
         self.assertIn("100x superiority was not proven", md)
+
+    def test_headline_counts_only_corpus_dimensions(self) -> None:
+        # The headline must average ONLY CORPUS-kind dimensions; capability/config/
+        # consistency/environment/attestation dims must be excluded (audit H1/H4).
+        result = bench.measure(_repo(), _stub_readiness)
+        self.assertEqual(result["headline_kind"], "CORPUS")
+        for key in result["headline_dimensions"]:
+            self.assertEqual(result["dimensions"][key]["kind"], "CORPUS")
+        for key in ("8_release_readiness_accuracy", "10_provider_flexibility", "9_tui_task_completion"):
+            self.assertNotIn(key, result["headline_dimensions"])
 
     def test_comparative_factor_is_measured_and_not_faked(self) -> None:
         c = bench.comparative_blocker_identification(_repo())
@@ -85,7 +117,9 @@ class BenchMeasureTests(unittest.TestCase):
 
 
 def _repo() -> Path:
-    return Path(__file__).resolve().parent.parent
+    # The fixture-seeded temp repo (clean-clone safe), not the working tree.
+    assert _SEEDED is not None
+    return Path(_SEEDED.name)
 
 
 def _stub_readiness(run_id: str) -> dict:
