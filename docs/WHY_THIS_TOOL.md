@@ -96,7 +96,8 @@ to ship — and proves it.** It doesn't replace your coding agent; it puts a mea
 auditable, multi-model governance layer around it, including open/local models.
 
 ## Evidence behind every claim here
-- Benchmark: `artifacts/bench/after.json` (12/12 dimensions, overall 88.0)
+- Benchmark: `artifacts/bench/after.json` (headline 75.2 — mean of CORPUS dimensions
+  only, corpus-relative; per-kind breakdown in `docs/EVIDENCE.md`)
 - Comparative factor: `artifacts/bench/comparative.json` (~5x median, 3–47x)
 - Comparison matrix: `artifacts/bench/comparison_matrix.md`
 - Dogfooding verdict: `docs/EVIDENCE.md`

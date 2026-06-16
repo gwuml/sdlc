@@ -24,6 +24,18 @@
       "tool_units": 1
     },
     {
+      "baseline_inspection_units": 3,
+      "factor": 3,
+      "run_id": "add-oauth-login-with-audit-logging-20260615-200411",
+      "tool_units": 1
+    },
+    {
+      "baseline_inspection_units": 3,
+      "factor": 3,
+      "run_id": "add-oauth-login-with-audit-logging-20260615-200503",
+      "tool_units": 1
+    },
+    {
       "baseline_inspection_units": 5,
       "factor": 5,
       "run_id": "audit-container-hard-isolation-20260525",
@@ -163,7 +175,7 @@
     }
   ],
   "proven_100x": false,
-  "runs": 26,
+  "runs": 28,
   "status": "MEASURED",
   "tool_units": 1
 }

@@ -1,12 +1,7 @@
 # Full Demo Walkthrough (captured)
 
-Record a screencast with either:
-```
-asciinema rec -c 'bash scripts/demo.sh' sdlc-demo.cast    # terminal cast
-# or just screen-record your terminal running: bash scripts/demo.sh
-```
-The interactive curses TUI is best shown live: `python -m sdlc tui product-self-run`.
-See docs/SCREENCAST.md for the scene-by-scene narration script.
+Record: `asciinema rec -c 'bash scripts/demo.sh' sdlc-demo.cast` (or screen-record `bash scripts/demo.sh`).
+Interactive TUI live: `python -m sdlc tui product-self-run`. Narration: docs/SCREENCAST.md.
 
 ```text
 
@@ -16,7 +11,7 @@ See docs/SCREENCAST.md for the scene-by-scene narration script.
 # out-code them — it decides whether their work is safe to ship, and proves it.
 $ python -m sdlc --help | sed -n '1,6p'
 usage: sdlc [-h] [--repo REPO]
-            {init,plan,start,brief,status,next,run,worker,prompt,redteam,isolation,scan,deploy,attest,agents,ledger,memory,finding,gate,git,tui,release,report,validate,bench,learn,diff} ...
+            {init,plan,start,brief,status,next,run,worker,prompt,redteam,isolation,scan,deploy,attest,agents,ledger,memory,finding,gate,git,tui,release,report,validate,bench,learn,diff,audit} ...
 
 Terminal-native Secure SDLC control plane for AI software delivery
 
@@ -24,10 +19,10 @@ positional arguments:
 
 ========== 1. Plan: turn a plain request into a gated, risk-classified run ==========
 $ python -m sdlc plan 'add OAuth login with audit logging' --risk auto --security auto | head -5
-Created run: add-oauth-login-with-audit-logging-20260615-131553
+Created run: add-oauth-login-with-audit-logging-20260615-200503
 Risk: EXTREME
-Prompt: /Users/rmallarapu/dev/sdlc/.sdlc/runs/add-oauth-login-with-audit-logging-20260615-131553/prompts/execution_prompt.md
-Plan: /Users/rmallarapu/dev/sdlc/.sdlc/runs/add-oauth-login-with-audit-logging-20260615-131553/plan.json
+Prompt: /Users/rmallarapu/dev/sdlc/.sdlc/runs/add-oauth-login-with-audit-logging-20260615-200503/prompts/execution_prompt.md
+Plan: /Users/rmallarapu/dev/sdlc/.sdlc/runs/add-oauth-login-with-audit-logging-20260615-200503/plan.json
 
 ========== 2. Status: 25 gates, local vs RELEASE state, blockers — one command ==========
 $ python -m sdlc status product-self-run | sed -n '1,14p'
@@ -82,23 +77,24 @@ Gates:  (* = blocking;  cols: NN id  local/verdict  release)
 # Per-role model selection; first available worker wins; exhaustion is recorded,
 # never silently skipped. Ollama runs fully local (no API key / no network).
 $ python3 -c "from sdlc.adapters import select_available_adapter as s; print(s(['codex','claude','gemini','ollama']))"
-{'name': 'codex', 'adapter': <sdlc.adapters.CodexAdapter object at 0x10a57b8c0>, 'tried': [], 'status': 'AVAILABLE'}
+{'name': 'codex', 'adapter': <sdlc.adapters.CodexAdapter object at 0x1065a38c0>, 'tried': [], 'status': 'AVAILABLE'}
 
 ========== 7. Benchmark: measured quality across 12 dimensions (evidence, not claims) ==========
 $ python -m sdlc bench run | sed -n '1,14p'
-Benchmark: 12/12 dimensions measured across 26 runs; overall score=88.0
-  1_setup_friction                 100.0
-  2_blocker_visibility             100.0
-  3_evidence_completeness          85.4
-  4_hallucination_count            100.0
-  5_redteam_independence           100.0
-  6_resume_recovery                100.0
-  7_failed_tool_visibility         44.4
-  8_release_readiness_accuracy     100.0
-  9_tui_task_completion            80.0
-  10_provider_flexibility          100.0
-  11_cost_token_visibility         100.0
-  12_github_pr_provenance          46.2
+Headline (CORPUS only, corpus-relative): 75.2 from 5/12 dimensions across 28 runs.
+Other dimensions are reported but excluded from the headline (see kind):
+  1_setup_friction                 100.0  CAPABILITY
+  2_blocker_visibility             100.0 *CORPUS
+  3_evidence_completeness          85.4  *CORPUS
+  4_hallucination_count            100.0 *CORPUS
+  5_redteam_independence           100.0  CONFIG
+  6_resume_recovery                100.0  CAPABILITY
+  7_failed_tool_visibility         44.4  *CORPUS
+  8_release_readiness_accuracy     100.0  CONSISTENCY
+  9_tui_task_completion            80.0   ATTESTATION
+  10_provider_flexibility          100.0  ENVIRONMENT
+  11_cost_token_visibility         100.0  CAPABILITY
+  12_github_pr_provenance          46.2  *CORPUS
 
 ========== 8. The honest comparative factor — measured, NOT '100x' ==========
 $ python3 -c "import json;c=json.load(open('artifacts/bench/comparative.json'));print('release-blocker identification: median', str(c['factor_median'])+'x', '| range', str(c['factor_min'])+'x-'+str(c['factor_max'])+'x', '| 100x proven:', c['proven_100x'])"

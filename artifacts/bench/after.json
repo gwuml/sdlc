@@ -26,12 +26,12 @@
       "value": 46.2
     },
     "1_setup_friction": {
-      "detail": "Cold `init` + first `plan` completed in 0.16s (target <300s).",
+      "detail": "Cold `init` + first `plan` completed in 0.20s (target <300s).",
       "kind": "CAPABILITY",
       "score": 100.0,
       "status": "MEASURED",
       "unit": "seconds",
-      "value": 0.164
+      "value": 0.199
     },
     "2_blocker_visibility": {
       "detail": "Computed readiness and located first blocking gate (intake_scope) for run 'add-oauth-login-with-audit-logging-20260615-101934'.",
@@ -39,10 +39,10 @@
       "score": 100.0,
       "status": "MEASURED",
       "unit": "seconds",
-      "value": 0.0014
+      "value": 0.0019
     },
     "3_evidence_completeness": {
-      "detail": "258/302 executed gates across 26 runs carry evidence.",
+      "detail": "258/302 executed gates across 28 runs carry evidence.",
       "kind": "CORPUS",
       "score": 85.4,
       "status": "MEASURED",
@@ -58,7 +58,7 @@
       "value": 0
     },
     "5_redteam_independence": {
-      "detail": "20/20 HIGH/EXTREME runs assign a red-team worker distinct from the implementer.",
+      "detail": "22/22 HIGH/EXTREME runs assign a red-team worker distinct from the implementer.",
       "kind": "CONFIG",
       "score": 100.0,
       "status": "MEASURED",
@@ -82,7 +82,7 @@
       "value": 44.4
     },
     "8_release_readiness_accuracy": {
-      "detail": "26/26 runs: release verdict is consistent with blocker presence.",
+      "detail": "28/28 runs: release verdict is consistent with blocker presence.",
       "kind": "CONSISTENCY",
       "score": 100.0,
       "status": "MEASURED",
@@ -136,7 +136,7 @@
   "measured_dimensions": 12,
   "note": "headline_score is the mean of CORPUS dimensions only and is relative to the evaluated run corpus; it is not an absolute tool-quality constant. Other dimensions are reported by kind (CAPABILITY/CONFIG/CONSISTENCY/ENVIRONMENT/ATTESTATION) and excluded from the headline.",
   "overall_score": 75.2,
-  "runs_evaluated": 26,
+  "runs_evaluated": 28,
   "schema": "sdlc.bench.result/v2",
   "total_dimensions": 12
 }

@@ -2,10 +2,32 @@
 
 from __future__ import annotations
 
+import shutil
+import tempfile
 import unittest
 from pathlib import Path
 
 from sdlc import bench
+
+_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "runs"
+_SEEDED: "tempfile.TemporaryDirectory | None" = None
+
+
+def setUpModule() -> None:
+    # Seed a temp repo from committed fixtures so bench tests are deterministic and
+    # pass on a clean clone (the working repo's .sdlc/runs is gitignored/empty there).
+    global _SEEDED
+    _SEEDED = tempfile.TemporaryDirectory()
+    runs = Path(_SEEDED.name) / ".sdlc" / "runs"
+    runs.mkdir(parents=True)
+    for run in _FIXTURES.iterdir():
+        if run.is_dir():
+            shutil.copytree(run, runs / run.name)
+
+
+def tearDownModule() -> None:
+    if _SEEDED is not None:
+        _SEEDED.cleanup()
 
 
 class BenchHelperTests(unittest.TestCase):
@@ -95,7 +117,9 @@ class BenchMeasureTests(unittest.TestCase):
 
 
 def _repo() -> Path:
-    return Path(__file__).resolve().parent.parent
+    # The fixture-seeded temp repo (clean-clone safe), not the working tree.
+    assert _SEEDED is not None
+    return Path(_SEEDED.name)
 
 
 def _stub_readiness(run_id: str) -> dict:

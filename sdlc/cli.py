@@ -5457,10 +5457,18 @@ def command_bench(args: argparse.Namespace) -> int:
         if args.json:
             print(json.dumps(result, indent=2, sort_keys=True))
         else:
-            print(f"Benchmark: {result['measured_dimensions']}/{result['total_dimensions']} dimensions measured "
-                  f"across {result['runs_evaluated']} runs; overall score={result['overall_score']}")
+            headline_dims = result.get("headline_dimensions", [])
+            print(f"Headline (CORPUS only, corpus-relative): {result.get('headline_score')} "
+                  f"from {len(headline_dims)}/{result['total_dimensions']} dimensions "
+                  f"across {result['runs_evaluated']} runs.")
+            print("Other dimensions are reported but excluded from the headline (see kind):")
             for key, dim in result["dimensions"].items():
-                mark = dim["score"] if dim["status"] == "MEASURED" else "UNAVAILABLE"
+                if dim["status"] != "MEASURED":
+                    mark = "UNAVAILABLE"
+                else:
+                    kind = dim.get("kind", "?")
+                    flag = "*" if kind == result.get("headline_kind") else " "
+                    mark = f"{dim['score']:<6}{flag}{kind}"
                 print(f"  {key:<32} {mark}")
         return 0
 
