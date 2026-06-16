@@ -1,4 +1,5 @@
 {
+  "fac10-accepted-critical": "NO_GO",
   "product-self-run": "NO_GO",
   "release-evidence-materialization": "NO_GO",
   "scanner-evidence-hardening": "NO_GO"

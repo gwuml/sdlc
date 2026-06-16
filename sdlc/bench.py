@@ -258,30 +258,38 @@ def _dim_release_accuracy(repo: Path, readiness_fn: Callable[[str], dict[str, An
 
 
 def _dim_tui_completion(repo: Path) -> dict[str, Any]:
-    # Spec FAC 8/22: scored only via an independent reviewer (not the builder).
-    # A signed attestation in artifacts/bench/tui_review.json is the accepted
-    # evidence. Without it, UNAVAILABLE — never self-scored.
+    # Spec FAC 8/22: scored ONLY via an independent reviewer (not the builder), and
+    # only when that independence is corroborable by external evidence — NOT a
+    # self-declared `is_builder:false` boolean (the builder can write that). We require
+    # a `corroboration` block referencing verifiable evidence whose git author/identity
+    # differs from the builder (e.g. a screen-recording artifact + a non-builder
+    # reviewer commit/OIDC identity). Absent that, this is UNAVAILABLE — a recorded
+    # operator attestation does not become a measured, headline-eligible score.
     review_path = repo / "artifacts" / "bench" / "tui_review.json"
     if not review_path.exists():
-        return _unavailable("No independent TUI review on file (artifacts/bench/tui_review.json). "
-                            "Spec requires a reviewer who did not build the TUI.")
+        return _unavailable("No TUI review on file; independent (non-builder) review required.")
     try:
         review = _json_load(review_path)
     except Exception as exc:  # noqa: BLE001
         return _unavailable(f"TUI review record unreadable: {exc}")
-    if review.get("is_builder") is not False or review.get("verdict") != "APPROVED":
-        return _unavailable("TUI review is not an independent APPROVED attestation.")
+    corroboration = review.get("corroboration")
+    if review.get("verdict") != "APPROVED" or not isinstance(corroboration, dict) \
+            or not corroboration.get("independent_evidence"):
+        return _unavailable(
+            "TUI review independence is not corroborated. A self-declared 'is_builder:false' "
+            "is insufficient; supply corroboration.independent_evidence (e.g. a screen "
+            "recording artifact + a non-builder reviewer identity). Operator attestation is "
+            "recorded but not credited as a measured score."
+        )
     confirmed = review.get("tasks_confirmed")
     if isinstance(confirmed, int):
         pct = 100.0 * confirmed / 10
-        detail = f"Independent reviewer confirmed {confirmed}/10 tasks without docs."
+        detail = (f"Independent reviewer confirmed {confirmed}/10 tasks without docs; "
+                  f"corroboration: {corroboration.get('independent_evidence')}.")
     else:
-        # Holistic approval, not a per-task count: credit the spec pass threshold
-        # (8/10) conservatively rather than claiming 100 without per-task data.
         pct = 80.0
-        detail = ("Independent reviewer (not the builder) attested APPROVED "
-                  f"('{review.get('attestation','')}'); holistic sign-off credited at the "
-                  "8/10 spec threshold (per-task rubric would refine this).")
+        detail = ("Independent reviewer attested APPROVED with corroborating evidence "
+                  f"({corroboration.get('independent_evidence')}); credited at the 8/10 threshold.")
     return _measured(round(pct, 1), pct, "percent", detail, kind="ATTESTATION")
 
 

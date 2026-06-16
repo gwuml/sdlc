@@ -13,8 +13,9 @@ into governed *workers* inside an evidence-driven Secure SDLC pipeline.
 
 So "better than Claude Code" is scoped precisely: better at **Secure SDLC
 orchestration, evidence, and release discipline** — not at writing code. On a measured
-same-task comparison (finding a run's release blockers) the advantage is **~5x typical,
-up to 47x** (`artifacts/bench/comparative.json`); we do **not** claim "100x." The
+same-task comparison (finding a run's release blockers) the advantage is **corpus-
+dependent** — single-to-low-double-digit× (e.g. ~5x median, up to 47x, on a multi-run
+corpus; regenerate with `sdlc bench run` to see your own); we do **not** claim "100x." The
 sharper wins below are *categorical* — capabilities a coding agent does not have at all.
 
 ## 5 ways this tool is better (for Secure SDLC orchestration)

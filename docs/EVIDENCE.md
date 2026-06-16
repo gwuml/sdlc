@@ -35,7 +35,7 @@ dimension is now tagged by **kind**, and only CORPUS dimensions count toward the
 | 5 | red-team independence | CONFIG | 100.0 | no (planner self-assigns) |
 | 8 | release-readiness accuracy | CONSISTENCY | 100.0 | no (tautological) |
 | 10 | provider flexibility | ENVIRONMENT | 100.0 | no (PATH-dependent) |
-| 9 | TUI task completion | ATTESTATION | 80.0 | no (operator attestation, not independently corroborated) |
+| 9 | TUI task completion | UNAVAILABLE | — | no (operator attestation on file, but not independently corroborated; not credited as a score) |
 
 Honest weak spots that are visible, not hidden: **failed-tool visibility (44.4)** and
 **github provenance (46.2)** are genuine areas to improve, and they pull the headline

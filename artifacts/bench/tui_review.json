@@ -1,10 +1,10 @@
 {
-  "schema": "sdlc.bench.tui_review/v1",
+  "schema": "sdlc.bench.tui_review/v2",
+  "type": "operator_attestation",
   "reviewer": "ravi.mallarapu@gmail.com",
-  "is_builder": false,
   "verdict": "APPROVED",
   "attestation": "TUI looks great; proceed",
-  "tasks_confirmed": null,
   "date": "2026-06-15",
-  "note": "Holistic independent sign-off (reviewer did not build the TUI). Per-task 10/10 rubric not enumerated; scored conservatively at the spec's 8/10 pass threshold."
+  "corroboration": null,
+  "note": "Operator approved the TUI, but this attestation is NOT independently corroborated: the record was committed under the builder identity and there is no external evidence (screen recording, non-builder reviewer commit/OIDC identity) to verify independence. Therefore benchmark dimension 9 reports UNAVAILABLE rather than crediting a score. To credit dim 9, add a `corroboration.independent_evidence` reference produced by a reviewer who is not the builder."
 }

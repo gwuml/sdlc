@@ -1,0 +1,18 @@
+[
+  {
+    "id": "CRITICAL-001",
+    "severity": "CRITICAL",
+    "title": "Accepted critical (FAC-10 parity fixture)",
+    "evidence": [
+      "risk_acceptance.md"
+    ],
+    "impact": "Must never reach a positive verdict.",
+    "required_fix": "Fix and CLOSE; cannot be accepted.",
+    "owner": "human_security_owner",
+    "status": "ACCEPTED",
+    "closed_by": "human_security_owner",
+    "closure_evidence": [
+      "accept: residual"
+    ]
+  }
+]

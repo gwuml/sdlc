@@ -6,8 +6,8 @@ not denied; they are a different category. We only fill cells we actually measur
 
 | Dimension | This tool | Generic coding agent | Evidence / note |
 |-----------|-----------|----------------------|-----------------|
-| Setup friction (s) | 0.199 (score 100.0) | NOT MEASURED | architecture: local-first, single CLI |
-| Blocker visibility (s) | 0.0019 (score 100.0) | NOT MEASURED | generic agents have no gate model |
+| Setup friction (s) | 0.286 (score 100.0) | NOT MEASURED | architecture: local-first, single CLI |
+| Blocker visibility (s) | 0.0014 (score 100.0) | NOT MEASURED | generic agents have no gate model |
 | Evidence completeness (%) | 85.4 (score 85.4) | NOT MEASURED | no gate-evidence ledger in generic agents |
 | Unsupported claims in report | 0 (score 100.0) | NOT MEASURED | no claim-discipline gate in generic agents |
 | Red-team independence (%) | 100.0 (score 100.0) | NOT MEASURED | no enforced cross-model red-team |

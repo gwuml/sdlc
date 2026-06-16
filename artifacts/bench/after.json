@@ -26,12 +26,12 @@
       "value": 46.2
     },
     "1_setup_friction": {
-      "detail": "Cold `init` + first `plan` completed in 0.20s (target <300s).",
+      "detail": "Cold `init` + first `plan` completed in 0.29s (target <300s).",
       "kind": "CAPABILITY",
       "score": 100.0,
       "status": "MEASURED",
       "unit": "seconds",
-      "value": 0.199
+      "value": 0.286
     },
     "2_blocker_visibility": {
       "detail": "Computed readiness and located first blocking gate (intake_scope) for run 'add-oauth-login-with-audit-logging-20260615-101934'.",
@@ -39,7 +39,7 @@
       "score": 100.0,
       "status": "MEASURED",
       "unit": "seconds",
-      "value": 0.0019
+      "value": 0.0014
     },
     "3_evidence_completeness": {
       "detail": "258/302 executed gates across 28 runs carry evidence.",
@@ -90,12 +90,12 @@
       "value": 100.0
     },
     "9_tui_task_completion": {
-      "detail": "Independent reviewer (not the builder) attested APPROVED ('TUI looks great; proceed'); holistic sign-off credited at the 8/10 spec threshold (per-task rubric would refine this).",
-      "kind": "ATTESTATION",
-      "score": 80.0,
-      "status": "MEASURED",
-      "unit": "percent",
-      "value": 80.0
+      "detail": "TUI review independence is not corroborated. A self-declared 'is_builder:false' is insufficient; supply corroboration.independent_evidence (e.g. a screen recording artifact + a non-builder reviewer identity). Operator attestation is recorded but not credited as a measured score.",
+      "kind": "UNAVAILABLE",
+      "score": null,
+      "status": "UNAVAILABLE",
+      "unit": null,
+      "value": null
     }
   },
   "headline_dimensions": [
@@ -108,9 +108,6 @@
   "headline_kind": "CORPUS",
   "headline_score": 75.2,
   "kind_breakdown": {
-    "ATTESTATION": [
-      "9_tui_task_completion"
-    ],
     "CAPABILITY": [
       "1_setup_friction",
       "6_resume_recovery",
@@ -131,9 +128,12 @@
     ],
     "ENVIRONMENT": [
       "10_provider_flexibility"
+    ],
+    "UNAVAILABLE": [
+      "9_tui_task_completion"
     ]
   },
-  "measured_dimensions": 12,
+  "measured_dimensions": 11,
   "note": "headline_score is the mean of CORPUS dimensions only and is relative to the evaluated run corpus; it is not an absolute tool-quality constant. Other dimensions are reported by kind (CAPABILITY/CONFIG/CONSISTENCY/ENVIRONMENT/ATTESTATION) and excluded from the headline.",
   "overall_score": 75.2,
   "runs_evaluated": 28,
