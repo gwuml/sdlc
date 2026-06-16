@@ -50,17 +50,26 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: detect-secrets scan (memory store + tree)
+      - name: detect-secrets scan (fail only on NEW secrets vs .secrets.baseline)
         run: |
           python -m pip install --upgrade pip detect-secrets
-          # Fail the build if a high-entropy secret is committed anywhere tracked.
-          detect-secrets scan --all-files > /tmp/secrets.json
+          # Scan git-tracked files (not --all-files: that picks up local venvs/caches).
+          # Known false positives (regex patterns in util.py, a commit hash, test HMAC
+          # data) are allowlisted in the committed .secrets.baseline. The redaction test
+          # corpus and run fixtures intentionally hold fake secret-shaped strings.
+          detect-secrets scan \
+            --exclude-files 'tests/test_redaction\.py' \
+            --exclude-files 'tests/fixtures/.*' > /tmp/fresh.json
           python - <<'PY'
           import json, sys
-          d = json.load(open("/tmp/secrets.json"))
-          hits = {f: v for f, v in d.get("results", {}).items()}
-          if hits:
-              print("::error::detect-secrets found candidate secrets:", list(hits))
+          def findings(path):
+              r = json.load(open(path)).get("results", {})
+              return {(f, e.get("hashed_secret")) for f, items in r.items() for e in items}
+          baseline = findings(".secrets.baseline")
+          fresh = findings("/tmp/fresh.json")
+          new = fresh - baseline
+          if new:
+              print("::error::NEW secrets not in .secrets.baseline:", sorted(f for f, _ in new))
               sys.exit(1)
-          print("detect-secrets: clean")
+          print(f"detect-secrets: clean ({len(baseline)} allowlisted, 0 new)")
           PY

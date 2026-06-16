@@ -4462,12 +4462,16 @@ class WorkerCaptureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             run_id = "worker-ledger-protect"
+            # Write through $SDLC_WORKER_REPO (the absolute repo path the adapter exports)
+            # so the forged mutation deterministically targets the run ledger regardless
+            # of the worker subprocess CWD — a relative ".sdlc/runs/..." path lands
+            # elsewhere on CI runners and made this test environment-dependent.
             script_body = (
                 "#!/bin/sh\n"
                 "cat >/dev/null\n"
-                f"printf '{{\"event\":\"forged\",\"run_id\":\"{run_id}\"}}\\n' >> .sdlc/runs/{run_id}/events.jsonl\n"
-                "printf forged > .sdlc/runs/{run_id}/forged.txt\n"
-            ).replace("{run_id}", run_id)
+                f'printf \'{{"event":"forged","run_id":"{run_id}"}}\\n\' >> "$SDLC_WORKER_REPO/.sdlc/runs/{run_id}/events.jsonl"\n'
+                f'printf forged > "$SDLC_WORKER_REPO/.sdlc/runs/{run_id}/forged.txt"\n'
+            )
             _script, old_path = self._install_fake_worker(repo, "codex", script_body)
             try:
                 self.assertEqual(main(["--repo", str(repo), "init"]), 0)
