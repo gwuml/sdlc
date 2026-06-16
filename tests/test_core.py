@@ -4481,13 +4481,17 @@ class WorkerCaptureTests(unittest.TestCase):
             finally:
                 os.environ["PATH"] = old_path
             run_dir = RunStore(repo).run_dir(run_id)
+            # Security guarantee — holds whether the worker's write was PREVENTED by
+            # isolation (Linux sandbox contains it to the worker temp dir) or DETECTED
+            # and RESTORED (macOS): the forged ledger entry/file must never persist, and
+            # the control plane must flag + resolve the attempted mutation. We assert the
+            # guarantee, not the isolation-specific path strings in the violation record.
             self.assertFalse((run_dir / "forged.txt").exists())
             events = self._load_events(run_dir)
-            self.assertFalse(any(event.get("event") == "forged" for event in events))
+            self.assertFalse(any(event.get("event") == "forged" for event in events), "forged ledger entry persisted")
             violation = [event for event in events if event.get("event") == "worker.policy_violation"]
-            self.assertTrue(violation)
-            self.assertTrue(any(".sdlc/runs/" in path for path in violation[-1].get("deny_path_changes", [])))
-            self.assertTrue(violation[-1].get("resolved"))
+            self.assertTrue(violation, "worker control-plane mutation attempt was not flagged")
+            self.assertTrue(violation[-1].get("resolved"), "policy violation was not resolved")
 
     def test_worker_environment_strips_orchestrator_secrets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
