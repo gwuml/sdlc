@@ -52,12 +52,15 @@ jobs:
           python-version: "3.11"
       - name: detect-secrets scan (fail only on NEW secrets vs .secrets.baseline)
         run: |
-          python -m pip install --upgrade pip detect-secrets
+          # Pin to the version the committed .secrets.baseline was generated with, so a
+          # future detect-secrets release can't introduce spurious "new" findings.
+          python -m pip install --upgrade pip "detect-secrets==1.5.0"
           # Scan git-tracked files (not --all-files: that picks up local venvs/caches).
           # Known false positives (regex patterns in util.py, a commit hash, test HMAC
           # data) are allowlisted in the committed .secrets.baseline. The redaction test
           # corpus and run fixtures intentionally hold fake secret-shaped strings.
           detect-secrets scan \
+            --exclude-files '\.secrets\.baseline' \
             --exclude-files 'tests/test_redaction\.py' \
             --exclude-files 'tests/fixtures/.*' > /tmp/fresh.json
           python - <<'PY'
