@@ -1,0 +1,2 @@
+{"event": "run.created", "run_id": "release-evidence-materialization", "ts": "2026-06-15T00:00:00+00:00"}
+{"event": "git.branch_created", "run_id": "release-evidence-materialization", "branch": "sdlc/release-evidence-materialization", "ts": "2026-06-15T00:01:00+00:00"}

@@ -13,33 +13,38 @@ different category from a general coding agent (e.g. Claude Code), whose strengt
 (in-editor edits, IDE integration, checkpoints) are not contested. We do **not**
 claim "100x better than Claude Code": **100x superiority was not proven.**
 
-## Measured benchmark (corpus-relative)
+## Measured benchmark (reproducible, corpus-relative)
 
-**Headline score: 75.2 — the mean of the 5 CORPUS dimensions only**, and it is
-**relative to the evaluated run corpus**, not an absolute tool-quality constant
-(re-running on a different corpus moves it). A brutal red-team audit flagged the
-earlier "88.0 / 12-of-12" framing as overstated because it averaged in dimensions
-that are near-constant, environment-specific, definitional, or self-attested. Each
-dimension is now tagged by **kind**, and only CORPUS dimensions count toward the headline.
+**Headline score: 87.5** — the mean of the CORPUS dimensions, measured against the
+**committed reference corpus** (`tests/fixtures/runs`). `sdlc bench run` uses your live
+`.sdlc/runs` when present; on a clean clone (where `.sdlc/runs` is gitignored/empty) it
+falls back to the reference corpus, so **the headline is reproducible anywhere** and
+`corpus_source` records which corpus was used. The score is still corpus-relative — it
+describes the corpus it measured, not an absolute tool constant.
+
+A brutal red-team audit flagged the earlier "88.0 / 12-of-12" framing as overstated
+because it averaged in dimensions that are near-constant, environment-specific,
+definitional, or self-attested. Each dimension is now tagged by **kind**; only CORPUS
+dimensions count toward the headline.
+
+Reference-corpus result (`artifacts/bench/after.json`, `corpus_source: reference:tests/fixtures/runs`):
 
 | # | Dimension | Kind | Score | In headline? |
 |---|-----------|------|-------|--------------|
 | 2 | blocker visibility | CORPUS | 100.0 | yes |
-| 3 | evidence completeness | CORPUS | 85.4 | yes |
-| 4 | hallucination count | CORPUS | 100.0 | yes |
-| 7 | failed-tool visibility | CORPUS | 44.4 | yes (weak spot) |
-| 12 | github PR provenance | CORPUS | 46.2 | yes (weak spot) |
-| 1 | setup friction | CAPABILITY | 100.0 | no (synthetic timing) |
-| 6 | resume recovery | CAPABILITY | 100.0 | no (synthetic e2e) |
-| 11 | cost / token visibility | CAPABILITY | 100.0 | no (extractor mechanism; 0 real-run coverage) |
+| 3 | evidence completeness | CORPUS | 100.0 | yes |
+| 7 | failed-tool visibility | CORPUS | 100.0 | yes |
+| 12 | github PR provenance | CORPUS | 50.0 | yes (weak spot) |
 | 5 | red-team independence | CONFIG | 100.0 | no (planner self-assigns) |
 | 8 | release-readiness accuracy | CONSISTENCY | 100.0 | no (tautological) |
 | 10 | provider flexibility | ENVIRONMENT | 100.0 | no (PATH-dependent) |
-| 9 | TUI task completion | UNAVAILABLE | — | no (operator attestation on file, but not independently corroborated; not credited as a score) |
+| 11 | cost / token visibility | CAPABILITY | 100.0 | no (extractor mechanism, not real coverage) |
+| 1, 4, 6, 9 | setup / hallucination / resume / TUI | UNAVAILABLE | — | no (not exercisable on the reference corpus; dim-9 needs an independent reviewer) |
 
-Honest weak spots that are visible, not hidden: **failed-tool visibility (44.4)** and
-**github provenance (46.2)** are genuine areas to improve, and they pull the headline
-down on purpose — that is the point.
+Headline = mean(100, 100, 100, 50) = **87.5**. The weak spot (**github provenance 50**)
+pulls it down on purpose — that is the point. On a richer live corpus the headline is
+typically lower (more dimensions exercised, e.g. failed-tool visibility surfaces real
+gaps); run `sdlc bench run` on your own `.sdlc/runs` to see it.
 
 ## Dogfooding: the tool gated its own work
 

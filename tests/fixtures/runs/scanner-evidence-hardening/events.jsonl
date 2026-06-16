@@ -1,0 +1,3 @@
+{"event": "run.created", "run_id": "scanner-evidence-hardening", "ts": "2026-06-15T00:00:00+00:00"}
+{"event": "git.branch_created", "run_id": "scanner-evidence-hardening", "branch": "sdlc/scanner-evidence-hardening", "ts": "2026-06-15T00:01:00+00:00"}
+{"event": "git.provenance_recorded", "run_id": "scanner-evidence-hardening", "commit": "deadbeef", "ts": "2026-06-15T00:02:00+00:00"}

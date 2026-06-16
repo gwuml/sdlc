@@ -258,39 +258,22 @@ def _dim_release_accuracy(repo: Path, readiness_fn: Callable[[str], dict[str, An
 
 
 def _dim_tui_completion(repo: Path) -> dict[str, Any]:
-    # Spec FAC 8/22: scored ONLY via an independent reviewer (not the builder), and
-    # only when that independence is corroborable by external evidence — NOT a
-    # self-declared `is_builder:false` boolean (the builder can write that). We require
-    # a `corroboration` block referencing verifiable evidence whose git author/identity
-    # differs from the builder (e.g. a screen-recording artifact + a non-builder
-    # reviewer commit/OIDC identity). Absent that, this is UNAVAILABLE — a recorded
-    # operator attestation does not become a measured, headline-eligible score.
+    # Spec FAC 8/22 requires an INDEPENDENT reviewer (not the builder). There is no
+    # implemented mechanism to verify reviewer independence in-process (a JSON field
+    # or a string can be self-populated by the builder), so this dimension is NEVER
+    # auto-scored — it is UNAVAILABLE by design. Any operator attestation in
+    # artifacts/bench/tui_review.json is recorded as context only and is deliberately
+    # NOT converted into a score, removing any path for a self-asserted number to leak
+    # into a report. Crediting it would require a future verifier that checks the
+    # reviewer's git/OIDC identity differs from the builder's.
     review_path = repo / "artifacts" / "bench" / "tui_review.json"
-    if not review_path.exists():
-        return _unavailable("No TUI review on file; independent (non-builder) review required.")
-    try:
-        review = _json_load(review_path)
-    except Exception as exc:  # noqa: BLE001
-        return _unavailable(f"TUI review record unreadable: {exc}")
-    corroboration = review.get("corroboration")
-    if review.get("verdict") != "APPROVED" or not isinstance(corroboration, dict) \
-            or not corroboration.get("independent_evidence"):
-        return _unavailable(
-            "TUI review independence is not corroborated. A self-declared 'is_builder:false' "
-            "is insufficient; supply corroboration.independent_evidence (e.g. a screen "
-            "recording artifact + a non-builder reviewer identity). Operator attestation is "
-            "recorded but not credited as a measured score."
-        )
-    confirmed = review.get("tasks_confirmed")
-    if isinstance(confirmed, int):
-        pct = 100.0 * confirmed / 10
-        detail = (f"Independent reviewer confirmed {confirmed}/10 tasks without docs; "
-                  f"corroboration: {corroboration.get('independent_evidence')}.")
-    else:
-        pct = 80.0
-        detail = ("Independent reviewer attested APPROVED with corroborating evidence "
-                  f"({corroboration.get('independent_evidence')}); credited at the 8/10 threshold.")
-    return _measured(round(pct, 1), pct, "percent", detail, kind="ATTESTATION")
+    recorded = review_path.exists()
+    return _unavailable(
+        "TUI task completion is not auto-scored: independent-reviewer verification is not "
+        "implemented, so it cannot be trusted as a measured score. "
+        + ("An operator attestation is on file (context only, not credited)."
+           if recorded else "No reviewer attestation on file.")
+    )
 
 
 def _json_load(path: Path) -> Any:

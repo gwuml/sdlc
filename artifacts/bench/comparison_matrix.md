@@ -6,10 +6,10 @@ not denied; they are a different category. We only fill cells we actually measur
 
 | Dimension | This tool | Generic coding agent | Evidence / note |
 |-----------|-----------|----------------------|-----------------|
-| Setup friction (s) | 0.286 (score 100.0) | NOT MEASURED | architecture: local-first, single CLI |
-| Blocker visibility (s) | 0.0014 (score 100.0) | NOT MEASURED | generic agents have no gate model |
-| Evidence completeness (%) | 85.4 (score 85.4) | NOT MEASURED | no gate-evidence ledger in generic agents |
-| Unsupported claims in report | 0 (score 100.0) | NOT MEASURED | no claim-discipline gate in generic agents |
+| Setup friction (s) | UNAVAILABLE | NOT MEASURED | architecture: local-first, single CLI |
+| Blocker visibility (s) | 0.0468 (score 100.0) | NOT MEASURED | generic agents have no gate model |
+| Evidence completeness (%) | 100.0 (score 100.0) | NOT MEASURED | no gate-evidence ledger in generic agents |
+| Unsupported claims in report | UNAVAILABLE | NOT MEASURED | no claim-discipline gate in generic agents |
 | Red-team independence (%) | 100.0 (score 100.0) | NOT MEASURED | no enforced cross-model red-team |
 | Release-readiness accuracy (%) | 100.0 (score 100.0) | NOT MEASURED | no release-verdict engine |
 | Provider flexibility (families) | 4 (score 100.0) | NOT MEASURED | varies by agent |
@@ -19,7 +19,7 @@ not denied; they are a different category. We only fill cells we actually measur
 Task: find the release blockers and their reasons for a run. Metric: artifacts inspected to identify release blockers + reasons (manual baseline) vs 1 tool command.
 
 - Tool: **1 command**.
-- Manual baseline (conservative): **4.0x** more inspection units (median across 28 runs; range 3x–47x).
+- Manual baseline (conservative): **4.0x** more inspection units (median across 4 runs; range 4x–4x).
 - **100x proven on this metric: NO.** The honest factor is the median above, not 100x.
 
 _Conservative steps proxy; under-counts manual effort (excludes re-deriving validation rules). Not wall-clock; not a measurement of any other product._

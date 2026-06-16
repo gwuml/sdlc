@@ -1,181 +1,37 @@
 {
-  "factor_max": 47,
+  "factor_max": 4,
   "factor_median": 4.0,
-  "factor_min": 3,
+  "factor_min": 4,
   "metric": "artifacts inspected to identify release blockers + reasons (manual baseline) vs 1 tool command",
   "note": "Conservative steps proxy; under-counts manual effort (excludes re-deriving validation rules). Not wall-clock; not a measurement of any other product.",
   "per_run": [
     {
-      "baseline_inspection_units": 3,
-      "factor": 3,
-      "run_id": "add-oauth-login-with-audit-logging-20260615-101934",
-      "tool_units": 1
-    },
-    {
-      "baseline_inspection_units": 3,
-      "factor": 3,
-      "run_id": "add-oauth-login-with-audit-logging-20260615-101952",
-      "tool_units": 1
-    },
-    {
-      "baseline_inspection_units": 3,
-      "factor": 3,
-      "run_id": "add-oauth-login-with-audit-logging-20260615-131553",
-      "tool_units": 1
-    },
-    {
-      "baseline_inspection_units": 3,
-      "factor": 3,
-      "run_id": "add-oauth-login-with-audit-logging-20260615-200411",
-      "tool_units": 1
-    },
-    {
-      "baseline_inspection_units": 3,
-      "factor": 3,
-      "run_id": "add-oauth-login-with-audit-logging-20260615-200503",
-      "tool_units": 1
-    },
-    {
-      "baseline_inspection_units": 5,
-      "factor": 5,
-      "run_id": "audit-container-hard-isolation-20260525",
-      "tool_units": 1
-    },
-    {
-      "baseline_inspection_units": 5,
-      "factor": 5,
-      "run_id": "audit-container-hard-isolation-network-20260525",
-      "tool_units": 1
-    },
-    {
-      "baseline_inspection_units": 26,
-      "factor": 26,
-      "run_id": "gate-validation-strengthening",
+      "baseline_inspection_units": 4,
+      "factor": 4,
+      "run_id": "fac10-accepted-critical",
       "tool_units": 1
     },
     {
       "baseline_inspection_units": 4,
       "factor": 4,
-      "run_id": "hard-audit-isolation-20260525",
-      "tool_units": 1
-    },
-    {
-      "baseline_inspection_units": 4,
-      "factor": 4,
-      "run_id": "hard-audit-isolation-network-20260525",
-      "tool_units": 1
-    },
-    {
-      "baseline_inspection_units": 4,
-      "factor": 4,
-      "run_id": "hard-audit-isolation-redteam2-20260525",
-      "tool_units": 1
-    },
-    {
-      "baseline_inspection_units": 4,
-      "factor": 4,
-      "run_id": "hard-audit-isolation-redteam3-20260525",
-      "tool_units": 1
-    },
-    {
-      "baseline_inspection_units": 4,
-      "factor": 4,
-      "run_id": "hard-audit-isolation-redteam4-20260525",
-      "tool_units": 1
-    },
-    {
-      "baseline_inspection_units": 4,
-      "factor": 4,
-      "run_id": "hard-audit-isolation-redteam5-20260525",
-      "tool_units": 1
-    },
-    {
-      "baseline_inspection_units": 4,
-      "factor": 4,
-      "run_id": "hard-audit-isolation-redteam6-20260525",
-      "tool_units": 1
-    },
-    {
-      "baseline_inspection_units": 27,
-      "factor": 27,
       "run_id": "product-self-run",
       "tool_units": 1
     },
     {
-      "baseline_inspection_units": 47,
-      "factor": 47,
-      "run_id": "production-grade-release-blockers",
+      "baseline_inspection_units": 4,
+      "factor": 4,
+      "run_id": "release-evidence-materialization",
       "tool_units": 1
     },
     {
       "baseline_inspection_units": 4,
       "factor": 4,
-      "run_id": "production-readiness-20260523",
-      "tool_units": 1
-    },
-    {
-      "baseline_inspection_units": 5,
-      "factor": 5,
-      "run_id": "production-readiness-20260523-network-audit",
-      "tool_units": 1
-    },
-    {
-      "baseline_inspection_units": 28,
-      "factor": 28,
-      "run_id": "release-evidence-materialization",
-      "tool_units": 1
-    },
-    {
-      "baseline_inspection_units": 26,
-      "factor": 26,
-      "run_id": "safe-git-integration",
-      "tool_units": 1
-    },
-    {
-      "baseline_inspection_units": 27,
-      "factor": 27,
       "run_id": "scanner-evidence-hardening",
-      "tool_units": 1
-    },
-    {
-      "baseline_inspection_units": 28,
-      "factor": 28,
-      "run_id": "ship-measured-benchmark-harness-and-curses-tui-for-t-20260615-022238",
-      "tool_units": 1
-    },
-    {
-      "baseline_inspection_units": 3,
-      "factor": 3,
-      "run_id": "tmp-fib-autopilot",
-      "tool_units": 1
-    },
-    {
-      "baseline_inspection_units": 3,
-      "factor": 3,
-      "run_id": "tmp-fib-autopilot-2",
-      "tool_units": 1
-    },
-    {
-      "baseline_inspection_units": 3,
-      "factor": 3,
-      "run_id": "tmp-trading-brief",
-      "tool_units": 1
-    },
-    {
-      "baseline_inspection_units": 26,
-      "factor": 26,
-      "run_id": "worker-output-capture",
-      "tool_units": 1
-    },
-    {
-      "baseline_inspection_units": 26,
-      "factor": 26,
-      "run_id": "worker-output-capture-final",
       "tool_units": 1
     }
   ],
   "proven_100x": false,
-  "runs": 28,
+  "runs": 4,
   "status": "MEASURED",
   "tool_units": 1
 }
