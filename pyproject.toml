@@ -8,7 +8,7 @@ version = "0.2.0"
 description = "Terminal-native Secure SDLC control plane for AI software delivery"
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "MIT"}
+license = {text = "Apache-2.0"}
 authors = [{name = "R M"}]
 dependencies = [
     "bandit>=1.7.10",
