@@ -1,0 +1,17 @@
+# Code owners for gwuml/sdlc.
+# Branch protection on `main` requires an approving review from a code owner
+# (require_code_owner_reviews = true) before any pull request can merge.
+# Outside contributors must open a PR from a fork; it cannot merge without
+# review from an owner listed below.
+
+# Default owner for everything in the repo.
+*                       @gwuml
+
+# Security- and release-critical paths (explicit, even though covered by * above,
+# so the intent is unambiguous to future collaborators).
+/.github/              @gwuml
+/sdlc/engine.py        @gwuml
+/sdlc/adapters.py      @gwuml
+/pyproject.toml        @gwuml
+/docs/RELEASE_PROCESS.md @gwuml
+/KEYS.md               @gwuml
