@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SDLC Control Plane — govern AI-written code, and prove it</title>
+<meta name="description" content="A terminal-native Secure-SDLC control plane that governs AI coding agents behind evidence-driven gates. Honest about what it does, what it doesn't, and what's been reviewed." />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  :root{
+    --bg:#0c0e0f; --panel:#14181a; --panel2:#1b2023; --ink:#e8eae6; --muted:#9aa39d;
+    --line:#2a3033; --go:#5fd08a; --nogo:#ff6b5e; --warn:#f2b65a; --accent:#7ee0c4;
+    --mono:"IBM Plex Mono",ui-monospace,monospace; --sans:"IBM Plex Sans",system-ui,sans-serif;
+    --serif:"Fraunces",Georgia,serif;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.62;
+    background-image:radial-gradient(60rem 40rem at 80% -10%,#16201d 0%,transparent 60%),
+      radial-gradient(50rem 40rem at -10% 10%,#1a1612 0%,transparent 55%);
+    background-attachment:fixed;}
+  .wrap{max-width:1000px;margin:0 auto;padding:0 24px}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code,kbd,.mono{font-family:var(--mono)}
+  h1,h2,h3{font-family:var(--serif);font-weight:600;letter-spacing:-.01em;line-height:1.1}
+  h2{font-size:clamp(1.5rem,3.4vw,2.3rem);margin:0 0 .4em}
+  h3{font-size:1.15rem;margin:1.6em 0 .3em;color:#fff}
+  section{padding:54px 0;border-top:1px solid var(--line)}
+  .eyebrow{font-family:var(--mono);font-size:.74rem;letter-spacing:.22em;text-transform:uppercase;color:var(--accent);margin:0 0 14px}
+  .lead{font-size:1.12rem;color:#d6dad3}
+  .muted{color:var(--muted)}
+
+  /* hero */
+  header.hero{padding:74px 0 26px;position:relative;overflow:hidden}
+  .badges{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 22px}
+  .chip{font-family:var(--mono);font-size:.72rem;padding:4px 10px;border:1px solid var(--line);border-radius:999px;color:var(--muted);background:var(--panel)}
+  .chip.go{color:var(--go);border-color:#27452f}
+  .chip.warn{color:var(--warn);border-color:#473b22}
+  h1{font-size:clamp(2.3rem,6.4vw,4.1rem);font-weight:800;margin:.1em 0 .25em;max-width:16ch}
+  h1 .hl{color:var(--accent)}
+  .hero p.lead{max-width:60ch}
+  .cta{display:flex;gap:12px;flex-wrap:wrap;margin:30px 0 8px}
+  .btn{font-family:var(--mono);font-size:.86rem;padding:11px 18px;border-radius:8px;border:1px solid var(--line);
+    background:var(--panel);color:var(--ink);transition:.18s}
+  .btn:hover{text-decoration:none;border-color:var(--accent);transform:translateY(-1px)}
+  .btn.primary{background:var(--accent);color:#06231b;border-color:var(--accent);font-weight:600}
+  .reveal{opacity:0;transform:translateY(12px);animation:rise .7s cubic-bezier(.2,.7,.2,1) forwards}
+  @keyframes rise{to{opacity:1;transform:none}}
+
+  /* terminal */
+  .term{background:#0a0c0d;border:1px solid var(--line);border-radius:12px;margin-top:30px;overflow:hidden;box-shadow:0 30px 80px -40px #000}
+  .term .bar{display:flex;gap:7px;padding:11px 14px;border-bottom:1px solid var(--line);background:var(--panel)}
+  .term .bar i{width:11px;height:11px;border-radius:50%;background:#2a3033;display:inline-block}
+  .term pre{margin:0;padding:18px;font-family:var(--mono);font-size:.83rem;line-height:1.7;overflow-x:auto;color:#cdd3cd}
+  .term .c{color:var(--accent)} .term .go{color:var(--go)} .term .no{color:var(--nogo)} .term .dim{color:#6b736d}
+
+  .grid{display:grid;gap:18px;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));margin-top:10px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px}
+  .card h3{margin-top:0}
+  .card.bad{border-color:#4a2a27}
+  .card.good{border-color:#27452f}
+  ul{padding-left:1.1em} li{margin:.3em 0}
+  .kv{font-family:var(--mono);font-size:.85rem}
+  .tag{font-family:var(--mono);font-size:.7rem;padding:2px 8px;border-radius:6px}
+  .tag.go{background:#13241a;color:var(--go)} .tag.no{background:#2a1715;color:var(--nogo)}
+  .tag.partial{background:#2a2413;color:var(--warn)}
+  table{width:100%;border-collapse:collapse;font-size:.93rem;margin-top:8px}
+  th,td{text-align:left;padding:10px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-family:var(--mono);font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+  .note{background:var(--panel2);border-left:3px solid var(--accent);padding:14px 16px;border-radius:0 8px 8px 0;margin:18px 0;color:#d6dad3}
+  .note.warn{border-left-color:var(--warn)}
+  footer{padding:48px 0 70px;border-top:1px solid var(--line);color:var(--muted);font-size:.9rem}
+  .disclaimer{font-size:.82rem;color:#7f877f;max-width:75ch}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <p class="eyebrow reveal">Secure-SDLC control plane · v0.2.0 · Apache-2.0</p>
+    <div class="badges reveal" style="animation-delay:.05s">
+      <span class="chip go">red-team: GO (session audit)</span>
+      <span class="chip">304 Python + 12 Rust tests green</span>
+      <span class="chip go">Sigstore-signed releases</span>
+      <span class="chip warn">young, not battle-tested</span>
+    </div>
+    <h1 class="reveal" style="animation-delay:.1s">Govern AI-written code — and <span class="hl">prove</span> it.</h1>
+    <p class="lead reveal" style="animation-delay:.16s">
+      AI coding agents write changes fast. <strong>sdlc</strong> is the layer that decides whether
+      those changes are safe to ship — a terminal-native control plane that drives any change through a
+      25-gate Secure-SDLC pipeline, demands evidence at every gate, runs an independent cross-model
+      red-team, and computes a deterministic release verdict. Models suggest; the orchestrator decides;
+      evidence proves.
+    </p>
+    <div class="cta reveal" style="animation-delay:.22s">
+      <a class="btn primary" href="https://github.com/gwuml/sdlc">View on GitHub</a>
+      <a class="btn" href="#use">Get started</a>
+      <a class="btn" href="#honesty">What it is <em>not</em></a>
+    </div>
+
+    <div class="term reveal" style="animation-delay:.3s">
+      <div class="bar"><i></i><i></i><i></i></div>
+<pre><span class="dim"># turn a request into a gated, risk-classified run — no AI calls, no cost</span>
+<span class="c">$</span> python -m sdlc plan "add OAuth login with audit logging" --risk auto
+Created run: add-oauth-login-…   Risk: <span class="no">EXTREME</span>
+
+<span class="c">$</span> python -m sdlc status &lt;run-id&gt;
+Release readiness: <span class="no">NO_GO</span> | blockers=25 | authority=ADVISORY
+
+<span class="c">$</span> python -m sdlc next &lt;run-id&gt;
+Next action: Provide evidence for gate intake_scope
+<span class="dim"># NO_GO is by design — it refuses to call work "done" without evidence.</span></pre>
+    </div>
+  </header>
+
+  <section id="problem">
+    <p class="eyebrow">The problem</p>
+    <h2>Speed without governance is unaudited risk.</h2>
+    <p class="lead">AI agents (Claude Code, Codex, Copilot, Gemini, local models) generate and modify code
+      at a pace humans can't review line-by-line. What's usually missing isn't capability — it's
+      <strong>governance</strong>:</p>
+    <ul>
+      <li>No <strong>enforced evidence</strong> that a change was scoped, threat-modeled, tested, scanned, and adversarially reviewed.</li>
+      <li>No <strong>tamper-evident record</strong> of who or what decided a change was safe.</li>
+      <li>Reports that assert “production-ready / secure” with <strong>nothing behind the claim</strong>.</li>
+      <li>A single model reviewing its own output — repeating its own blind spots.</li>
+    </ul>
+    <p>For anything touching security, privacy, infrastructure, or regulated domains, that gap means
+      shipping change you can't actually audit or attribute.</p>
+  </section>
+
+  <section id="impact">
+    <p class="eyebrow">Impact</p>
+    <h2>The gap is categorical, and growing.</h2>
+    <p>AI-assisted coding is now mainstream across the industry, and the volume of machine-generated
+      change keeps rising. Every team adopting these agents on consequential code inherits the same
+      governance gap above. <span class="muted">We deliberately don't cite a headline statistic here —
+      the point is categorical, not a number we can defend. Claim discipline applies to our own marketing too.</span></p>
+  </section>
+
+  <section id="solve">
+    <p class="eyebrow">How sdlc solves it</p>
+    <h2>A control plane over your AI workers.</h2>
+    <p class="lead">sdlc doesn't replace your coding agent — it <strong>governs</strong> it. Any of
+      Claude&nbsp;Code / Codex / Gemini / Kimi / local Ollama / a custom CLI becomes a <em>worker</em>
+      assigned to a role, behind gates the orchestrator owns.</p>
+    <div class="grid">
+      <div class="card"><h3>25-gate pipeline</h3>Intake → threat model → implementation → scans → red-team → attestation → deploy → final report. Each gate has an owner, required artifacts, and a verdict computed from evidence — not prose.</div>
+      <div class="card"><h3>Tamper-evident ledger</h3>Every decision is appended to an event log with chained SHA-256 digests. Tampering is detected in every validation mode.</div>
+      <div class="card"><h3>Cross-model red-team</h3>For high-risk work the reviewer must be a <em>different</em> model than the implementer — diversity catches what a monoculture repeats.</div>
+      <div class="card"><h3>Claim discipline</h3>Reports can't assert “production-ready / 100x / compliant” without linked evidence. The tool even gated <em>its own</em> development NO_GO.</div>
+      <div class="card"><h3>Deterministic verdict</h3>GO / NO_GO / GO_WITH_ACCEPTED_RESIDUAL_RISKS is computed from evidence. A CRITICAL/HIGH finding can never be “accepted” into a positive verdict — it must be fixed.</div>
+      <div class="card"><h3>Signed, evidenced releases</h3>Releases ship a CycloneDX SBOM and a Sigstore-keyless signature, verifiable with <code>cosign</code>.</div>
+    </div>
+  </section>
+
+  <section id="alternatives">
+    <p class="eyebrow">Is there no alternative?</p>
+    <h2>There are adjacent tools — none we found combine all of this.</h2>
+    <p>Honest answer: <strong>yes, alternatives and adjacent tools exist</strong>, and sdlc uses several of
+      them rather than replacing them:</p>
+    <ul>
+      <li>CI/CD (GitHub Actions, GitLab CI) — runs steps, but has no risk-classified gate model or evidence verdict.</li>
+      <li>Policy-as-code (OPA / Conftest) — enforces rules, but isn't an SDLC orchestration layer over AI agents.</li>
+      <li>Scanners (Bandit, detect-secrets, pip-audit, Checkov) — sdlc <em>orchestrates these</em> as gate evidence.</li>
+      <li>Supply-chain provenance (SLSA, Sigstore) — sdlc adopts Sigstore for release signing.</li>
+      <li>The coding agents themselves — which produce changes but don't govern or adversarially review them.</li>
+    </ul>
+    <p>What we have <strong>not</strong> found is a single open tool that combines a risk-classified 25-gate
+      pipeline + a tamper-evident evidence ledger + enforced cross-model red-team + claim discipline +
+      a deterministic release verdict, framed specifically as a control plane over AI coding agents.
+      <span class="muted">We do not claim none exists — only that this combination is uncommon.</span></p>
+  </section>
+
+  <section id="why">
+    <p class="eyebrow">Why use it</p>
+    <h2>Evidence you can audit, claims you can trust.</h2>
+    <div class="grid">
+      <div class="card"><h3>Measured, not asserted</h3>A built-in benchmark scores the tool on real dimensions and labels what it can't measure UNAVAILABLE. (Scores are <em>corpus-relative</em>, not an absolute grade.)</div>
+      <div class="card"><h3>Multi-model by default</h3>Assign the best model per role; force cross-model independence for high-risk work; fall back honestly when a worker is unavailable.</div>
+      <div class="card"><h3>Local-first &amp; offline</h3>Planning, gates, the TUI, benchmark, and validation run with no network. Nothing leaves your machine by default.</div>
+      <div class="card"><h3>Honest by construction</h3>It refuses to overstate — including about itself. The committed comparative figure is a measured ~4× on a small (4-run) corpus, <em>not</em> “100×” (<code>artifacts/bench/comparative.json</code>).</div>
+    </div>
+  </section>
+
+  <section id="unique">
+    <p class="eyebrow">What's unique</p>
+    <h2>It governs AI agents — and holds itself to the same bar.</h2>
+    <p>The distinctive thing isn't any single gate; it's the <strong>combination as a governance layer over
+      AI coding agents</strong>, plus a culture of claim discipline the tool enforces on itself. During its
+      own development it ran its own 25-gate pipeline, found a real <em>CRITICAL</em> in its own verdict
+      logic, gated itself <strong>NO_GO</strong>, and only reported what an independent red-team could reproduce.
+      A governance tool that rubber-stamped itself would be the failure mode.</p>
+  </section>
+
+  <section id="use">
+    <p class="eyebrow">How to use it</p>
+    <h2>Ten minutes, no AI calls, no cost.</h2>
+    <div class="term">
+      <div class="bar"><i></i><i></i><i></i></div>
+<pre><span class="c">$</span> git clone https://github.com/gwuml/sdlc &amp;&amp; cd sdlc
+<span class="c">$</span> python3 -m venv .venv &amp;&amp; . .venv/bin/activate &amp;&amp; pip install -e .
+
+<span class="c">$</span> python -m sdlc init
+<span class="c">$</span> python -m sdlc plan "add OAuth login with audit logging" --risk auto
+<span class="c">$</span> python -m sdlc status &lt;run-id&gt;     <span class="dim"># 25 gates, local vs release state</span>
+<span class="c">$</span> python -m sdlc next &lt;run-id&gt;       <span class="dim"># the safest next step toward GO</span>
+<span class="c">$</span> python -m sdlc tui &lt;run-id&gt;        <span class="dim"># interactive dashboard (q to quit)</span></pre>
+    </div>
+    <p style="margin-top:18px">Then read, in order: <a href="https://github.com/gwuml/sdlc/blob/main/README.md">README</a> →
+      <a href="https://github.com/gwuml/sdlc/blob/main/docs/USAGE.md">USAGE.md</a> (install + 25 worked
+      transcripts) → <a href="https://github.com/gwuml/sdlc/blob/main/docs/WHY_THIS_TOOL.md">WHY_THIS_TOOL</a> →
+      <a href="https://github.com/gwuml/sdlc/blob/main/docs/FEATURE_GATE_MAP.md">FEATURE_GATE_MAP</a>.
+      Install a signed release by verifying it first — see USAGE.md.</p>
+  </section>
+
+  <section id="develop">
+    <p class="eyebrow">How to develop it further</p>
+    <h2>Extend the workers, gates, and benchmark.</h2>
+    <ul>
+      <li><strong>Add a worker family</strong>: implement an adapter in <code>sdlc/adapters.py</code> (invoked via subprocess with a sanitized environment, prompt over stdin) and register it. Custom CLIs are registered in policy. <span class="muted">(execv + binary-hash pinning is planned for the Rust port, FAC-19 — not in the current Python path.)</span></li>
+      <li><strong>Add or tune a gate</strong>: gate definitions live in <code>sdlc/pipeline.py</code> (the canonical 25); deterministic checks in <code>sdlc/engine.py</code>.</li>
+      <li><strong>Add a benchmark dimension</strong>: <code>sdlc/bench.py</code>, tagged by kind so only real corpus measurements enter the headline.</li>
+      <li><strong>Contribute</strong>: tests gate every PR (<code>.github/workflows/ci.yml</code>); see <code>CONTRIBUTING.md</code>, <code>AGENTS.md</code> (roles + hard safety rules), and <code>SECURITY.md</code>.</li>
+    </ul>
+    <p class="muted">There's also a Rust foundation (<code>src/</code>) for an eventual single binary — today it's
+      an early, parity-tested library skeleton (models + 25-gate pipeline + verdict), not a working CLI.</p>
+  </section>
+
+  <section id="honesty">
+    <p class="eyebrow">What it is NOT good for</p>
+    <h2>Where sdlc is the wrong tool.</h2>
+    <div class="grid">
+      <div class="card bad"><h3>Not a coding agent</h3>It won't write your code better than Claude Code or Codex. It <em>governs</em> them; it doesn't out-code them.</div>
+      <div class="card bad"><h3>Not for throwaway work</h3>For prototypes, scripts, and spikes, a 25-gate pipeline is overkill and will feel like friction.</div>
+      <div class="card bad"><h3>Not a deploy bot</h3>Production deploy is locked by default and requires explicit human approval + rollback evidence. It will not auto-ship.</div>
+      <div class="card bad"><h3>Not a correctness guarantee</h3>It evidences and gates; it does not prove your code is correct, secure, or compliant. Those claims need real evidence you supply.</div>
+    </div>
+    <h3>Who should not use it (yet)</h3>
+    <ul>
+      <li>Solo developers on toy or personal projects who want zero friction.</li>
+      <li>Teams wanting fully-autonomous, unsupervised AI that ships without humans in the loop.</li>
+      <li>Windows-only shops — only macOS/Linux are exercised today.</li>
+      <li>Anyone needing a hardened, externally-audited, battle-tested product <em>right now</em> (see gaps below).</li>
+    </ul>
+  </section>
+
+  <section id="gaps">
+    <p class="eyebrow">Major gaps — read before adopting</p>
+    <h2>What's still missing.</h2>
+    <table>
+      <tr><th>Gap</th><th>Status</th></tr>
+      <tr><td>End-to-end run driven to a real <span class="mono">GO</span> with <em>live</em> AI workers on a real change</td><td><span class="tag no">NOT VALIDATED</span> — the single most important gap</td></tr>
+      <tr><td>Single no-Python Rust binary</td><td><span class="tag partial">EARLY</span> library skeleton only; CLI not ported</td></tr>
+      <tr><td>PyPI distribution (<code>pip install sdlc-control-plane</code>)</td><td><span class="tag partial">PENDING</span> — install from a signed release or source</td></tr>
+      <tr><td>Benchmark headline as an absolute quality grade</td><td><span class="tag partial">CORPUS-RELATIVE</span> — describes the corpus, not an absolute score</td></tr>
+      <tr><td>Windows support / large-repo performance</td><td><span class="tag no">UNTESTED</span></td></tr>
+      <tr><td>Branch protection enforcing non-author review on <code>main</code></td><td><span class="tag partial">POLICY-ONLY</span> until repo settings allow it</td></tr>
+    </table>
+  </section>
+
+  <section id="security">
+    <p class="eyebrow">Security — reviewed vs. not</p>
+    <h2>Be precise about what's been checked.</h2>
+    <div class="grid">
+      <div class="card good">
+        <h3>Reviewed <span class="tag go">done</span></h3>
+        <ul>
+          <li>An internal automated security review of the change set <strong>raised no high-confidence exploitable findings</strong> (internal, not an external pentest — see the right column).</li>
+          <li>Multiple independent, hostile <strong>red-team rounds culminating in a reproduced GO</strong> on clean clones (see <code>docs/SESSION_AUDIT_PROMPT.md</code>, PR&nbsp;#3).</li>
+          <li>Verdict integrity (a CRITICAL/HIGH can't be accepted into a positive verdict).</li>
+          <li>Secret redaction (PEM / PuTTY / SSH2 / JWK / tokens) with fuzz tests.</li>
+          <li>Tamper-evident ledger; HMAC actor-proof for finding closure; workers can't mutate the control-plane ledger.</li>
+          <li>Release-signature verification (<code>cosign verify-blob</code> → Verified OK on the real v0.2.0).</li>
+        </ul>
+      </div>
+      <div class="card bad">
+        <h3>NOT reviewed / not validated <span class="tag no">open</span></h3>
+        <ul>
+          <li>No <strong>external or professional third-party penetration test</strong>.</li>
+          <li>Real worker execution against <strong>live LLMs end-to-end</strong>, and <code>deploy execute</code> against a real target.</li>
+          <li>Cross-platform (Windows) and the Rust binary path.</li>
+          <li>The security of the <strong>operator-installed worker CLIs</strong> themselves (Claude Code, Codex, …) — outside this tool's boundary.</li>
+          <li>Performance / resource behavior on large repositories.</li>
+        </ul>
+      </div>
+    </div>
+    <p class="muted">Report vulnerabilities privately per <a href="https://github.com/gwuml/sdlc/blob/main/SECURITY.md">SECURITY.md</a> — not via public issues.</p>
+  </section>
+
+  <footer>
+    <p class="disclaimer">
+      <strong>Honest status:</strong> sdlc is a young, open-source tool (v0.2.0, Apache-2.0). It is
+      <em>adoptable and trustworthy to install</em> — licensed, CI-gated, documented, signed, and
+      independently red-teamed — but it is <strong>not</strong> a hardened, externally-audited,
+      production-proven product, and it has not yet been validated doing its core job end-to-end with live
+      AI workers. Every number on this page is measured and intentionally un-inflated; where we couldn't
+      measure something, we said so. If anything here reads as marketing rather than fact, it's a bug —
+      please open an issue.
+    </p>
+    <p style="margin-top:18px"><a href="https://github.com/gwuml/sdlc">github.com/gwuml/sdlc</a> · Apache-2.0 · built with claim discipline</p>
+  </footer>
+
+</div>
+</body>
+</html>
