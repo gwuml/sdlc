@@ -36,9 +36,28 @@ cargo test && cargo fmt --check && cargo clippy -- -D warnings   # if you touche
 ## Commit and PR conventions
 
 - Commit subject: `verb: subject` (e.g. `fix: enforce FAC-10 in Python`).
-- Branch from `main`; open a PR. `main` requires an approving review from someone who
-  is **not** the commit author (see `docs/RELEASE_PROCESS.md`).
+- Branch from `main`; open a PR. `main` requires an approving review from a **code
+  owner** (`.github/CODEOWNERS`) who is **not** the commit author, plus green
+  `python` / `rust` / `secrets-scan` checks (see `docs/RELEASE_PROCESS.md`).
 - Fill in the PR template (what changed, tests run, risks).
+- Outside contributors work from a fork; a maintainer must approve the first workflow
+  run before CI executes on your PR.
+
+### Signed commits are required
+
+`main` enforces **signed commits** for the PR path — your PR cannot merge cleanly with
+unsigned commits (admins bypass this, but you should not rely on that). Configure signing
+once (SSH signing reuses an existing key):
+
+```bash
+git config --global gpg.format ssh
+git config --global user.signingkey ~/.ssh/id_ed25519.pub
+git config --global commit.gpgsign true
+```
+
+Then add the **same public key** to GitHub under *Settings → SSH and GPG keys → New SSH
+key → Key type: "Signing Key"*. (GPG signing works too; see GitHub's docs.) Commits made
+through the GitHub web UI/API are signed automatically.
 
 ## Reporting bugs / requesting features
 
