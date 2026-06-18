@@ -29,14 +29,19 @@ and supports conditions 9, 15, and 20.
   (the `ci.yml` jobs that run on every pull request). Release-time gates in
   `release.yml` (SBOM content-equality, reproducibility, 100x-claim grep) run on the
   `v*` tag, not as PR-merge gates.
-- **Require signed commits** — every commit on `main` must carry a verified
-  signature. Commits authored through the GitHub web UI/API are signed automatically;
-  local commits need SSH or GPG signing configured (see `CONTRIBUTING.md`).
+- **Require signed commits** — commits reaching `main` through the PR path (and any
+  non-admin push) must carry a verified signature; PR-merge commits made via the
+  GitHub UI/API are signed automatically. Configure local SSH or GPG signing (see
+  `CONTRIBUTING.md`).
 - **Block force-pushes and branch deletion.**
 - `enforce_admins` is intentionally **off**: this is a single-maintainer repo and
   GitHub forbids approving your own PR, so admin enforcement would lock the sole owner
-  out of merging. The owner retains admin bypass for the PR/review/status gates; the
-  signed-commit, force-push, and deletion rules still apply to everyone.
+  out of merging. **Consequence:** repository admins bypass *all* of the rules above —
+  PR/review/status checks, signed commits, force-push, and deletion. These rules
+  therefore constrain **outside contributors** (the actual "don't pollute `main`"
+  threat: they cannot push, force-push, delete, or merge without a signed, reviewed,
+  CI-green PR), not the owner. Turn `enforce_admins` on only once a second maintainer
+  exists who can review and approve.
 
 ### Tag protection
 
