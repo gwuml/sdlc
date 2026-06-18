@@ -14,17 +14,36 @@ and supports conditions 9, 15, and 20.
   not be cut from a feature branch or an arbitrary tag, so branch protection cannot
   be bypassed.
 
-## Branch protection (required)
+## Branch protection (configured and enforced)
 
-`main` must have GitHub branch protection configured with:
+`main` has GitHub branch protection **active** with the settings below (verify with
+`gh api repos/<owner>/sdlc/branches/main/protection`):
 
-- Require a pull request before merging.
-- Require **at least one approving review from an account that is not the commit
-  author** (the independent-reviewer rule).
-- Require status checks to pass (build, tests, parity, SBOM-equality, reproducibility,
-  100x-claim grep, secrets scan).
-- Dismiss stale approvals on new commits.
-- No direct pushes to `main`.
+- **Require a pull request before merging** — no direct pushes by non-admins.
+- **One approving review required**, from a **code owner** (`.github/CODEOWNERS`), and
+  GitHub blocks self-approval — this enforces the independent-reviewer rule for any
+  outside contributor.
+- **Dismiss stale approvals** on new commits; **require approval of the last push**.
+- **Require conversation resolution** before merge.
+- **Required status checks (strict / up-to-date):** `python`, `rust`, `secrets-scan`
+  (the `ci.yml` jobs that run on every pull request). Release-time gates in
+  `release.yml` (SBOM content-equality, reproducibility, 100x-claim grep) run on the
+  `v*` tag, not as PR-merge gates.
+- **Require signed commits** — every commit on `main` must carry a verified
+  signature. Commits authored through the GitHub web UI/API are signed automatically;
+  local commits need SSH or GPG signing configured (see `CONTRIBUTING.md`).
+- **Block force-pushes and branch deletion.**
+- `enforce_admins` is intentionally **off**: this is a single-maintainer repo and
+  GitHub forbids approving your own PR, so admin enforcement would lock the sole owner
+  out of merging. The owner retains admin bypass for the PR/review/status gates; the
+  signed-commit, force-push, and deletion rules still apply to everyone.
+
+### Tag protection
+
+A repository **ruleset** ("Protect release tags (v\*)") protects `refs/tags/v*` against
+**deletion** and **non-fast-forward (force) updates**, so a published release tag cannot
+be moved or removed. The repository-admin role is configured as a bypass actor for tag
+management.
 
 ## Authorized actors
 
