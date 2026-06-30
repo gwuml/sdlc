@@ -4442,7 +4442,9 @@ def _auto_gate_work_detail(gate_id: str, *, implementation_path: str, artifact_k
         "mission_non_goals": "Separated local gate evidence from production/cloud authority and avoided unsupported readiness claims.",
         "repo_context_env_branch": f"Captured repository context and wrote the generated {implementation_label} under the working repo.",
         "risk_blast_radius": f"Classified the request as a bounded {implementation_label} run with cloud mutation disabled unless approved.",
-        "data_privacy_secrets": "Kept the implementation local and dependency-free, avoided secrets, and stored approval evidence in redacted artifacts.",
+        "data_privacy_secrets": (
+            "Kept the implementation local and dependency-free, avoided credentials, and stored approval evidence in redacted artifacts."
+        ),
         "baseline_freeze": "Recorded prework and provenance artifacts for replay and audit review.",
         "supply_chain_sbom": f"Generated a dependency-free {implementation_label} with no new package supply-chain surface.",
         "agent_plan_permissions": "Recorded role-agent planning evidence without granting production authority.",
