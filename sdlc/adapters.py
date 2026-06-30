@@ -595,6 +595,12 @@ def _prepare_hard_audit_home(temp_dir: Path, env: dict[str, str]) -> Path:
                     "history",
                     "*.log",
                     "*.sock",
+                    "*.sqlite-shm",
+                    "*.sqlite-wal",
+                    "*.db-shm",
+                    "*.db-wal",
+                    "*-shm",
+                    "*-wal",
                 ),
             )
     for key in ("USER", "LOGNAME"):

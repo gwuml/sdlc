@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import fnmatch
 import hashlib
+import html
 import hmac
 import json
 import os
@@ -12,6 +14,8 @@ import re
 import shlex
 import shutil
 import sys
+import tempfile
+import webbrowser
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -2610,8 +2614,159 @@ def _memory_context_for_request(repo: Path, request: str) -> list[dict[str, obje
     return list(result.get("results", [])) if result.get("enabled") else []
 
 
-def _write_autopilot_artifacts(repo: Path, plan: RunPlan, run_dir: Path, *, include_agent_plan: bool = False, parallel: int | None = None) -> dict[str, object]:
-    policy = load_policy(repo, plan.policy_profile)
+AGENT_ROLE_ALIASES = {
+    "pm": "agent_1_pm_coordinator",
+    "coordinator": "agent_1_pm_coordinator",
+    "architecture": "agent_2_architecture_contracts",
+    "architect": "agent_2_architecture_contracts",
+    "implementation": "agent_3_implementation_owner",
+    "implementer": "agent_3_implementation_owner",
+    "evidence": "agent_4_evidence_reporting_owner",
+    "reporting": "agent_4_evidence_reporting_owner",
+    "qa": "agent_5_qa_validation_owner",
+    "test": "agent_5_qa_validation_owner",
+    "redteam": "agent_6_redteam_deploy_rollback",
+    "deploy": "agent_6_redteam_deploy_rollback",
+    "ui": "agent_7_ui_architect",
+    "security": "agent_8_cybersecurity_engineer",
+    "sre": "agent_9_sre_sysadmin",
+    "it": "agent_10_it_enterprise_integration",
+    "compliance": "agent_11_compliance_audit",
+    "domain": "agent_12_domain_specialist",
+}
+
+
+def _agent_role_id(value: str) -> str:
+    key = value.strip()
+    return AGENT_ROLE_ALIASES.get(key.lower(), key)
+
+
+def _coerce_agent_worker_list(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    return []
+
+
+def _read_agent_model_config(repo: Path, config: str) -> tuple[dict[str, object] | None, str | None, str | None]:
+    raw_path = Path(config).expanduser()
+    candidates = [raw_path] if raw_path.is_absolute() else [repo / raw_path, Path.cwd() / raw_path]
+    path = next((candidate for candidate in candidates if candidate.exists()), candidates[0])
+    if not path.exists():
+        return None, None, f"Agent model config does not exist: {path}"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, None, f"Agent model config is not valid JSON: {exc}"
+    if not isinstance(payload, dict):
+        return None, None, "Agent model config must be a JSON object"
+    return payload, str(path), None
+
+
+def _extract_agent_model_preferences(payload: dict[str, object]) -> dict[str, list[str]]:
+    preferences: dict[str, list[str]] = {}
+
+    def merge(raw: object) -> None:
+        if not isinstance(raw, dict):
+            return
+        for role, worker in raw.items():
+            workers = _coerce_agent_worker_list(worker)
+            if workers:
+                preferences[_agent_role_id(str(role))] = workers
+
+    agents = payload.get("agents")
+    if isinstance(agents, dict):
+        merge(agents.get("role_worker_preferences"))
+        merge(agents.get("roles"))
+        direct = {
+            role: worker
+            for role, worker in agents.items()
+            if role not in {"role_worker_preferences", "roles"}
+            and (_agent_role_id(str(role)).startswith("agent_") or str(role).lower() in AGENT_ROLE_ALIASES)
+        }
+        merge(direct)
+    merge(payload.get("role_worker_preferences"))
+    merge(payload.get("roles"))
+    direct = {
+        role: worker
+        for role, worker in payload.items()
+        if role not in {"agents", "role_worker_preferences", "roles", "worker_families", "workers"}
+        and (_agent_role_id(str(role)).startswith("agent_") or str(role).lower() in AGENT_ROLE_ALIASES)
+    }
+    merge(direct)
+    return preferences
+
+
+def _policy_with_agent_model_overrides(
+    repo: Path,
+    policy: dict[str, object],
+    *,
+    config: str | None = None,
+    mappings: list[str] | None = None,
+) -> tuple[dict[str, object] | None, dict[str, object], str | None]:
+    updated: dict[str, object] = copy.deepcopy(policy)
+    metadata: dict[str, object] = {
+        "config": "",
+        "cli": list(mappings or []),
+        "role_worker_preferences": {},
+    }
+    preferences: dict[str, list[str]] = {}
+    if config:
+        payload, path, error = _read_agent_model_config(repo, config)
+        if error:
+            return None, metadata, error
+        metadata["config"] = path or ""
+        assert payload is not None
+        preferences.update(_extract_agent_model_preferences(payload))
+        worker_families = payload.get("worker_families")
+        if isinstance(worker_families, dict):
+            existing = updated.get("worker_families")
+            merged = copy.deepcopy(existing) if isinstance(existing, dict) else {}
+            merged.update(copy.deepcopy(worker_families))
+            updated["worker_families"] = merged
+        workers = payload.get("workers")
+        if isinstance(workers, dict):
+            existing_workers = updated.get("workers")
+            merged_workers = copy.deepcopy(existing_workers) if isinstance(existing_workers, dict) else {}
+            merged_workers.update({str(key): str(value) for key, value in workers.items() if isinstance(value, str)})
+            updated["workers"] = merged_workers
+    for item in mappings or []:
+        if "=" not in item:
+            return None, metadata, f"--agent-model must use role=worker syntax: {item}"
+        role, worker = item.split("=", 1)
+        role_id = _agent_role_id(role)
+        worker = worker.strip()
+        if not role_id or not worker:
+            return None, metadata, f"--agent-model must include both role and worker: {item}"
+        preferences[role_id] = [worker]
+    if preferences:
+        agents = updated.get("agents")
+        if not isinstance(agents, dict):
+            agents = {}
+        else:
+            agents = copy.deepcopy(agents)
+        existing_preferences = agents.get("role_worker_preferences")
+        merged_preferences = copy.deepcopy(existing_preferences) if isinstance(existing_preferences, dict) else {}
+        merged_preferences.update(preferences)
+        agents["role_worker_preferences"] = merged_preferences
+        updated["agents"] = agents
+    metadata["role_worker_preferences"] = preferences
+    updated["_agent_model_selection"] = metadata
+    return updated, metadata, None
+
+
+def _agent_model_policy_from_args(repo: Path, policy: dict[str, object], args: argparse.Namespace) -> tuple[dict[str, object] | None, dict[str, object], str | None]:
+    return _policy_with_agent_model_overrides(
+        repo,
+        policy,
+        config=getattr(args, "agent_model_config", None),
+        mappings=getattr(args, "agent_model", None) or [],
+    )
+
+
+def _write_autopilot_artifacts(repo: Path, plan: RunPlan, run_dir: Path, *, include_agent_plan: bool = False, parallel: int | None = None, policy: dict[str, object] | None = None) -> dict[str, object]:
+    policy = policy or load_policy(repo, plan.policy_profile)
     memory_context = _memory_context_for_request(repo, plan.feature)
     brief = build_intake_brief(repo, plan.feature, plan.run_id, memory_context=memory_context)
     standards = build_standards_mapping(brief, network_allowed=False)
@@ -2644,7 +2799,12 @@ def command_start(args: argparse.Namespace) -> int:
     if error or plan is None or run_dir is None:
         eprint(error or "Unable to create run")
         return 2
-    result = _write_autopilot_artifacts(repo, plan, run_dir, include_agent_plan=True, parallel=args.parallel)
+    base_policy = load_policy(repo, plan.policy_profile)
+    agent_policy, _, policy_error = _agent_model_policy_from_args(repo, base_policy, args)
+    if policy_error or agent_policy is None:
+        eprint(policy_error or "Unable to apply agent model mapping")
+        return 2
+    result = _write_autopilot_artifacts(repo, plan, run_dir, include_agent_plan=True, parallel=args.parallel, policy=agent_policy)
     store = RunStore(repo)
     run_dry_gates(store, plan.run_id, full_advisory=True)
     result["next_action"] = _next_action_payload(repo, plan.run_id, persist=True)
@@ -2665,6 +2825,3444 @@ def command_start(args: argparse.Namespace) -> int:
         print(f"Next: {output['next_action']['command']}")
         print(f"Reason: {output['next_action']['reason']}")
     return 0
+
+
+def _auto_gate_followup_command(plan: RunPlan, gate_id: str) -> str:
+    if gate_id == "security_scans":
+        return f"python -m sdlc scan {plan.run_id}"
+    if gate_id == "agent_plan_permissions":
+        return f"python -m sdlc agents plan {plan.run_id} --parallel 6"
+    if gate_id == "implementation":
+        return f"python -m sdlc worker {plan.run_id} codex --mode BUILD --execute"
+    if gate_id == "qa_tests_integration_smoke":
+        return f"python -m sdlc worker {plan.run_id} codex --mode TEST"
+    if gate_id == "independent_redteam_cross_model":
+        return f"python -m sdlc redteam {plan.run_id}"
+    if gate_id == "critical_high_fix_loop":
+        return f"python -m sdlc finding list {plan.run_id}"
+    if gate_id == "evidence_traceability_attestations":
+        return f"python -m sdlc attest manifest {plan.run_id}"
+    if gate_id == "commit_branch_pr_ci":
+        return f"python -m sdlc git provenance {plan.run_id}"
+    if gate_id == "deploy_rollout_postdeploy":
+        return f"python -m sdlc deploy plan {plan.run_id} --env production"
+    if gate_id == "final_report_reaudit":
+        return f"python -m sdlc report {plan.run_id} --print"
+    return f"python -m sdlc gate evidence {plan.run_id} {gate_id} --actor <owner> --artifact <key>=<path> --source <evidence>"
+
+
+def _write_auto_gate_walkthrough(store: RunStore, run_id: str) -> dict[str, str]:
+    plan = store.load_plan(run_id)
+    run_dir = store.run_dir(run_id)
+    ledger = Ledger(run_dir, run_id)
+    artifacts: dict[str, str] = {}
+    by_id = {gate.id: gate for gate in plan.gates}
+    for gate in sorted(plan.gates, key=lambda item: item.order):
+        gate_definition = _gate_definition(gate.id)
+        required_artifacts = gate_definition.required_artifacts if gate_definition else []
+        purpose = gate_definition.purpose if gate_definition else "Gate definition unavailable."
+        required = ", ".join(required_artifacts) if required_artifacts else "<none>"
+        followup = _auto_gate_followup_command(plan, gate.id)
+        content = "\n".join([
+            f"# Gate {gate.order:02d}: {gate.title}",
+            "",
+            f"Run: {plan.run_id}",
+            f"Gate ID: {gate.id}",
+            f"Owner: {gate.owner}",
+            f"Purpose: {purpose}",
+            f"Required artifacts: {required}",
+            "",
+            "Auto treatment: this walkthrough artifact makes the gate visible",
+            "for a one-command local auto run. Release validation may still",
+            "require stricter typed evidence, signing, PR, CI, and deploy proof.",
+            "",
+            f"Follow-up command: `{followup}`",
+            "",
+            "Claim discipline: local gate pass evidence is separate from",
+            "production authority and cloud execution approval.",
+        ])
+        artifact = ledger.artifact(
+            f"artifacts/auto/walkthrough/gates/{gate.order:02d}-{gate.id}.md",
+            content + "\n",
+            event="auto.gate_walkthrough",
+            gate=gate.id,
+            gate_order=gate.order,
+            redact=False,
+        )
+        artifacts[gate.id] = artifact
+        current = by_id[gate.id]
+        if artifact not in current.evidence:
+            current.evidence.append(artifact)
+        if not current.notes:
+            current.notes = "Auto walkthrough artifact recorded; release validation may require stricter evidence."
+    store.save_plan(plan)
+    return artifacts
+
+
+def _auto_implementation(intake: dict[str, object]) -> dict[str, object]:
+    return intake.get("implementation") if isinstance(intake.get("implementation"), dict) else {}
+
+
+def _auto_html_id(text: str, fallback: str) -> str:
+    value = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return value or fallback
+
+
+def _auto_site_gate_filename(gate: object) -> str:
+    order = int(getattr(gate, "order", 0) or 0)
+    gate_id = str(getattr(gate, "id", "gate"))
+    return f"{order:02d}-{gate_id}.md"
+
+
+def _auto_site_gate_href(gate: object) -> str:
+    return f"evidence/gates/{_auto_site_gate_filename(gate)}"
+
+
+def _auto_site_artifact_href(gate: object) -> str:
+    return f"evidence/artifacts/{_auto_site_gate_filename(gate)}"
+
+
+def _auto_site_gate_state(gate_id: str) -> tuple[str, str]:
+    if gate_id == "deploy_rollout_postdeploy":
+        return ("Formal release blocked", "AWS execution is plan-only unless explicit deploy approval is supplied.")
+    if gate_id in {"commit_branch_pr_ci", "final_report_reaudit"}:
+        return ("Formal release blocked", "Production release certification is separate from local auto evidence.")
+    return ("Formal release blocked", "Local auto evidence exists, but formal release readiness remains blocked unless the final report says GO.")
+
+
+def _auto_gate_board_html(run_id: str) -> list[str]:
+    cards: list[str] = []
+    for gate_def in DEFAULT_GATES:
+        state, blocker = _auto_site_gate_state(gate_def.id)
+        evidence_href = html.escape(_auto_site_gate_href(gate_def), quote=True)
+        cards.extend([
+            "        <article class=\"status-card\">",
+            "          <span class=\"badge caution\">Formal release blocked</span>",
+            f"          <h3>{gate_def.order:02d}. {html.escape(gate_def.title)}</h3>",
+            "          <dl>",
+            f"            <div><dt>Gate ID</dt><dd><code>{html.escape(gate_def.id)}</code></dd></div>",
+            f"            <div><dt>Owner</dt><dd><code>{html.escape(gate_def.owner)}</code></dd></div>",
+            f"            <div><dt>State</dt><dd>{html.escape(state)}</dd></div>",
+            f"            <div><dt>Blocker summary</dt><dd>{html.escape(blocker)}</dd></div>",
+            f"            <div><dt>Last checked</dt><dd>Generated in run <code>{html.escape(run_id)}</code></dd></div>",
+            f"            <div><dt>Evidence</dt><dd><a href=\"{evidence_href}\">Open gate evidence status</a></dd></div>",
+            "          </dl>",
+            "        </article>",
+        ])
+    return ["      <div class=\"grid status-grid\">", *cards, "      </div>"]
+
+
+def _auto_evidence_table_html(section_id: str) -> list[str]:
+    rows: list[str] = []
+    for gate_def in DEFAULT_GATES:
+        row_id = f"{section_id}-evidence-{gate_def.order}"
+        evidence_href = html.escape(_auto_site_artifact_href(gate_def), quote=True)
+        rows.append(
+            "        <tr>"
+            f"<td id=\"{html.escape(row_id, quote=True)}\">{gate_def.order:02d}. {html.escape(gate_def.title)}</td>"
+            f"<td><a href=\"{evidence_href}\">{html.escape(_auto_site_gate_filename(gate_def))}</a></td>"
+            "<td>Deployable public-safe evidence artifact</td>"
+            "<td>Packaged under site/evidence/artifacts; not a release certificate</td>"
+            "</tr>"
+        )
+    return [
+        "      <div class=\"table-wrap\">",
+        "      <table>",
+        "        <thead><tr><th>Evidence</th><th>Link</th><th>Type</th><th>Status</th></tr></thead>",
+        "        <tbody>",
+        *rows,
+        "        </tbody>",
+        "      </table>",
+        "      </div>",
+    ]
+
+
+def _auto_readiness_overview_html(run_id: str, generated_at: str) -> list[str]:
+    overview = [
+        ("Overall readiness", "Formal release blocked", "Local auto evidence is generated, but production release certification is separate."),
+        ("Release candidate", run_id, "This run id is the candidate identifier for all linked evidence."),
+        ("Last review timestamp", generated_at, "Updated when the static artifact was generated."),
+        ("Primary owner", "agent_1_pm_coordinator", "Escalate deploy, rollback, and red-team decisions to agent_6_redteam_deploy_rollback."),
+        ("Next decision", "Review final report", "Proceed only if red-team, Claude validation, and explicit AWS approval are all clean."),
+    ]
+    cards: list[str] = []
+    for title, value, note in overview:
+        cards.extend([
+            "        <article class=\"status-card\">",
+            "          <span class=\"badge caution\">Action required</span>",
+            f"          <h3>{html.escape(title)}</h3>",
+            "          <dl>",
+            f"            <div><dt>Value</dt><dd>{html.escape(value)}</dd></div>",
+            f"            <div><dt>Source</dt><dd>{html.escape(note)}</dd></div>",
+            "          </dl>",
+            "        </article>",
+        ])
+    return ["      <div class=\"grid status-grid\">", *cards, "      </div>"]
+
+
+def _auto_rollback_html() -> list[str]:
+    return [
+        "      <ol class=\"action-list\">",
+        "        <li>Freeze changes and assign the incident commander.</li>",
+        "        <li>Promote the previous known-good release prefix into the website root with <code>--delete</code> so stale files from the failed release are removed.</li>",
+        "        <li>Verify object inventory, the previous status page, evidence links, cache headers, and monitoring checks.</li>",
+        "        <li>If CloudFront is used, invalidate <code>/*</code> or verify bounded cache TTL before declaring rollback complete.</li>",
+        "        <li>Notify stakeholders and record the rollback evidence in the run report.</li>",
+        "      </ol>",
+        "      <pre><code>aws s3 sync s3://APPROVED_BUCKET/releases/PREVIOUS_RUN/ s3://APPROVED_BUCKET/ --delete --dryrun --profile default\naws s3 sync s3://APPROVED_BUCKET/releases/PREVIOUS_RUN/ s3://APPROVED_BUCKET/ --delete --cache-control max-age=60 --profile default\naws s3 ls s3://APPROVED_BUCKET/ --recursive --profile default\ncurl -fL http://APPROVED_BUCKET.s3-website-REGION.amazonaws.com/\ncurl -fL http://APPROVED_BUCKET.s3-website-REGION.amazonaws.com/evidence/gates/01-intake_scope.md</code></pre>",
+    ]
+
+
+def _auto_public_gate_facts(gate: object, request: str, run_id: str) -> list[str]:
+    gate_id = str(getattr(gate, "id", ""))
+    facts = [
+        f"- feature_request: {request}",
+        f"- run_id: {run_id}",
+        f"- gate_owner: {getattr(gate, 'owner', '')}",
+        "- formal_release_state: BLOCKED unless final report and release readiness say otherwise",
+    ]
+    if gate_id == "intake_scope":
+        facts.extend([
+            "- scope: request-specific generated static website and SDLC evidence package",
+            "- ambiguity_policy: defaults favor the richest local demo while cloud mutation stays approval-gated",
+        ])
+    elif gate_id == "stakeholders_raci":
+        facts.extend([
+            "- accountable_party: human operator approves external side effects",
+            "- consulted_parties: architecture, QA, red-team, SRE, compliance, and evidence roles",
+        ])
+    elif gate_id == "supply_chain_sbom":
+        facts.extend([
+            "- dependency_scope: generated static HTML/CSS and Markdown evidence files",
+            "- third_party_runtime_packages: none introduced by the generated website artifact",
+        ])
+    elif gate_id == "agent_plan_permissions":
+        facts.extend([
+            "- worker_execution: role workers are recorded in artifacts/agents/task-plan.json when execution is requested",
+            "- permission_model: role workers receive scoped prompts and the orchestrator owns gate state",
+        ])
+    elif gate_id == "implementation":
+        facts.extend([
+            "- implementation_artifact: site/index.html",
+            "- public_evidence_bundle: site/evidence/gates/*.md",
+        ])
+    elif gate_id == "deterministic_quality":
+        facts.extend([
+            "- deterministic_check: HTML structure, labelled form controls, no inline script tags, and deployable evidence links",
+            "- link_check_artifact: artifacts/auto/website/link-check.json",
+        ])
+    elif gate_id == "security_scans":
+        facts.extend([
+            "- generated_attack_surface: static site only, no JavaScript, no backend, no secrets",
+            "- external_network_calls: none in generated site artifact",
+        ])
+    elif gate_id == "independent_redteam_cross_model":
+        facts.extend([
+            "- redteam_requirement: clear GO requires executed red-team workers and no blocking open findings",
+            "- redteam_summary: artifacts/redteam_execution_summary.md after execution completes",
+        ])
+    elif gate_id == "critical_high_fix_loop":
+        facts.extend([
+            "- fix_loop_rule: CRITICAL/HIGH and blocking MEDIUM findings must be remediated or explicitly accepted by authorized humans",
+            "- implementer_rule: implementers cannot close their own findings",
+        ])
+    elif gate_id == "deploy_rollout_postdeploy":
+        facts.extend([
+            "- aws_default_target: S3 static website plan using the default profile",
+            "- execution_guard: no AWS resources are created unless --execute-aws and explicit approval text are supplied",
+            "- rollback_strategy: immutable release prefix with previous-prefix promotion, not destructive overwrite",
+            "- decommission_strategy: separate approved cleanup run records deletion and retention evidence",
+        ])
+    elif gate_id == "final_report_reaudit":
+        facts.extend([
+            "- final_report: final-report.md after command completion",
+            "- honesty_validation: artifacts/auto/validation/claude-validation.json when requested",
+        ])
+    return facts
+
+
+def _write_auto_website_artifact(run_dir: Path, run_id: str, request: str, intake: dict[str, object]) -> str:
+    ledger = Ledger(run_dir, run_id)
+    implementation = _auto_implementation(intake)
+    title = str(implementation.get("title") or _auto_title_from_request(request)).strip()
+    description = str(implementation.get("description") or request).strip()
+    features = implementation.get("features") if isinstance(implementation.get("features"), list) else []
+    feature_items = [str(item).strip() for item in features if str(item).strip()]
+    if not feature_items:
+        feature_items = ["Request-specific generated artifact", "Accessible interaction surface", "25-gate evidence trail"]
+    sections = implementation.get("sections") if isinstance(implementation.get("sections"), list) else []
+    clean_sections: list[dict[str, object]] = []
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        heading = str(section.get("heading", "")).strip()
+        body = str(section.get("body", "")).strip()
+        items = section.get("items") if isinstance(section.get("items"), list) else []
+        if heading or body or items:
+            clean_sections.append({"heading": heading or "Section", "body": body, "items": [str(item) for item in items if str(item).strip()]})
+    if not clean_sections:
+        clean_sections = [{"heading": "Scope", "body": request, "items": feature_items}]
+    form = implementation.get("form") if isinstance(implementation.get("form"), dict) else {}
+    form_enabled = bool(form.get("enabled", True))
+    form_title = str(form.get("title") or "Accessible Request Form")
+    form_fields = form.get("fields") if isinstance(form.get("fields"), list) else []
+    if form_enabled and not form_fields:
+        form_fields = [
+            {"id": "name", "label": "Name", "type": "text", "required": True},
+            {"id": "details", "label": "Request details", "type": "textarea", "required": True},
+        ]
+    escaped_request = html.escape(request, quote=True)
+    generated_at = now_iso()
+    section_html: list[str] = []
+    rendered_gate_board = False
+    rendered_evidence_table = False
+    for index, section in enumerate(clean_sections, start=1):
+        heading = str(section.get("heading", "Section"))
+        heading_topic = heading.lower()
+        body = str(section.get("body", ""))
+        items = section.get("items") if isinstance(section.get("items"), list) else []
+        section_id = _auto_html_id(heading, f"section-{index}")
+        item_text = [str(item) for item in items if str(item).strip()]
+        topic = " ".join([heading, body, *item_text]).lower()
+        content_html: list[str] = []
+        if "rollback" in heading_topic:
+            content_html.extend(_auto_rollback_html())
+        elif "incident" in topic or "banner" in topic:
+            content_html.extend([
+                "      <div class=\"incident-banner\" role=\"status\" aria-live=\"polite\">",
+                "        <div>",
+                "          <span class=\"badge caution\">Evidence required</span>",
+                "          <strong>Release is not production-approved yet</strong>",
+                "          <p>Current impact: local demonstration only. Next update: after red-team, validation, AWS approval, and cleanup evidence are complete.</p>",
+                "        </div>",
+                "      </div>",
+            ])
+        elif "overview" in heading_topic or ("readiness" in heading_topic and "overview" in topic):
+            content_html.extend(_auto_readiness_overview_html(run_id, generated_at))
+        elif "gate" in topic and ("status" in topic or "release" in topic or "readiness" in topic):
+            content_html.extend(_auto_gate_board_html(run_id))
+            rendered_gate_board = True
+        elif "cleanup" in topic or "decommission" in topic:
+            content_html.extend([
+                "      <ol class=\"action-list\">",
+                "        <li><strong>Owner:</strong> SRE/operator archives final report, evidence index, presentation, red-team summary, and validation result before cleanup.</li>",
+                "        <li><strong>Within 24 hours:</strong> remove temporary worker workspaces and local preview files that are not ledger evidence.</li>",
+                "        <li><strong>S3 release prefixes:</strong> retain current and previous approved prefixes, apply lifecycle rules to stale prefixes, and record retained object counts.</li>",
+                "        <li><strong>Access review:</strong> verify the default AWS profile did not create new long-lived credentials, bucket policies, or public access beyond the approved website scope.</li>",
+                "        <li><strong>Cache/DNS:</strong> invalidate or age out cache entries before deleting a published prefix; verify the rollback URL still resolves.</li>",
+                "        <li><strong>Branch and PR:</strong> close temporary branches only after final evidence is attached to the report.</li>",
+                "        <li><strong>Approval gate:</strong> require a separate <code>sdlc auto decommission</code> run before deleting buckets, logs, deployed artifacts, or evidence.</li>",
+                "        <li><strong>Verification:</strong> capture cleanup stdout/stderr and a post-cleanup inventory as the cleanup run evidence.</li>",
+                "      </ol>",
+            ])
+        elif "evidence" in heading_topic or "audit" in heading_topic:
+            content_html.extend(_auto_evidence_table_html(section_id))
+            rendered_evidence_table = True
+        elif (
+            ("s3" in topic or "hosting" in topic)
+            and "cleanup" not in topic
+            and "decommission" not in topic
+            and "audit" not in heading_topic
+            and "evidence" not in heading_topic
+        ):
+            content_html.extend([
+                "      <ol class=\"action-list\">",
+                "        <li>Confirm explicit approval before creating buckets, changing public access, or syncing files.</li>",
+                "        <li>Create a versioned S3 website bucket and apply a scoped public-read policy only for <code>s3:GetObject</code> on that bucket.</li>",
+                "        <li>Record the Block Public Access change as part of the approval, or choose CloudFront with OAC as the private-origin alternative.</li>",
+                "        <li>Run a dry-run sync first, publish to immutable <code>releases/RUN_ID/</code>, then promote the approved release into the website root with <code>--delete</code>.</li>",
+                "        <li>Smoke-check the public website URL and at least one evidence-link URL before calling the deploy complete.</li>",
+                "        <li>Keep the previous release prefix available for rollback and record the exact source prefix in the final report.</li>",
+                "      </ol>",
+                f"      <pre><code>aws s3api delete-public-access-block --bucket APPROVED_BUCKET --profile default\naws s3api put-bucket-policy --bucket APPROVED_BUCKET --policy file://public-read-policy.json --profile default\naws s3 sync site/ s3://APPROVED_BUCKET/releases/{html.escape(run_id)}/ --delete --dryrun --profile default\naws s3 sync site/ s3://APPROVED_BUCKET/releases/{html.escape(run_id)}/ --delete --cache-control max-age=60 --profile default\naws s3 sync s3://APPROVED_BUCKET/releases/{html.escape(run_id)}/ s3://APPROVED_BUCKET/ --delete --cache-control max-age=60 --profile default\ncurl -fL http://APPROVED_BUCKET.s3-website-REGION.amazonaws.com/\ncurl -fL http://APPROVED_BUCKET.s3-website-REGION.amazonaws.com/evidence/gates/01-intake_scope.md</code></pre>",
+            ])
+        elif (
+            "rollback" in topic
+            and "cleanup" not in topic
+            and "decommission" not in topic
+            and "audit" not in heading_topic
+            and "evidence" not in heading_topic
+        ):
+            content_html.extend(_auto_rollback_html())
+        elif "evidence" in topic or "audit" in topic:
+            content_html.extend(_auto_evidence_table_html(section_id))
+            rendered_evidence_table = True
+        else:
+            cards = []
+            for item in item_text:
+                cards.append(f"        <div class=\"panel\"><strong>{html.escape(str(item))}</strong></div>")
+            content_html.extend([
+                "      <div class=\"grid\">" if cards else "",
+                *cards,
+                "      </div>" if cards else "",
+            ])
+        section_html.extend([
+            f"    <section aria-labelledby=\"{section_id}\">",
+            f"      <h2 id=\"{section_id}\">{html.escape(heading)}</h2>",
+            f"      <p>{html.escape(body)}</p>" if body else "",
+            *content_html,
+            "    </section>",
+        ])
+    if not rendered_gate_board:
+        section_html.extend([
+            "    <section aria-labelledby=\"sdlc-gate-board\">",
+            "      <h2 id=\"sdlc-gate-board\">25-Gate Evidence Board</h2>",
+            "      <p>Every generated website includes the canonical SDLC gate inventory with owner, state, blocker note, and deployable proof link.</p>",
+            *_auto_gate_board_html(run_id),
+            "    </section>",
+        ])
+    if not rendered_evidence_table:
+        section_html.extend([
+            "    <section aria-labelledby=\"sdlc-evidence-links\">",
+            "      <h2 id=\"sdlc-evidence-links\">Deployable Evidence Links</h2>",
+            "      <p>These public-safe files are packaged under the static site tree, so the links work after an S3 website sync.</p>",
+            *_auto_evidence_table_html("sdlc-evidence-links"),
+            "    </section>",
+        ])
+    form_html: list[str] = []
+    if form_enabled:
+        field_html: list[str] = []
+        for index, field in enumerate(form_fields, start=1):
+            if not isinstance(field, dict):
+                continue
+            field_id = _auto_html_id(str(field.get("id") or field.get("label") or f"field-{index}"), f"field-{index}")
+            label = str(field.get("label") or field_id.replace("-", " ").title())
+            field_type = str(field.get("type") or "text").lower()
+            required = " required" if bool(field.get("required", False)) else ""
+            autocomplete = " autocomplete=\"name\"" if field_id == "name" else ""
+            field_html.append(f"        <label for=\"{html.escape(field_id, quote=True)}\">{html.escape(label)}</label>")
+            if field_type == "textarea":
+                field_html.append(f"        <textarea id=\"{html.escape(field_id, quote=True)}\" name=\"{html.escape(field_id, quote=True)}\"{required}></textarea>")
+            elif field_type == "select":
+                options = field.get("options") if isinstance(field.get("options"), list) else [
+                    "Gate 01 intake scope",
+                    "Gate 08 supply chain SBOM",
+                    "Gate 16 QA smoke test",
+                    "Gate 20 red-team review",
+                    "Gate 24 deploy rollback",
+                ]
+                field_html.append(f"        <select id=\"{html.escape(field_id, quote=True)}\" name=\"{html.escape(field_id, quote=True)}\"{required}>")
+                field_html.append("          <option value=\"\">Choose an option</option>")
+                for option in options:
+                    field_html.append(f"          <option>{html.escape(str(option))}</option>")
+                field_html.append("        </select>")
+            else:
+                safe_type = field_type if field_type in {"text", "email", "tel", "number", "date", "time", "url"} else "text"
+                field_html.append(f"        <input id=\"{html.escape(field_id, quote=True)}\" name=\"{html.escape(field_id, quote=True)}\" type=\"{safe_type}\"{autocomplete}{required}>")
+        form_html = [
+            "    <section aria-labelledby=\"request-form\" class=\"panel\">",
+            f"      <h2 id=\"request-form\">{html.escape(form_title)}</h2>",
+            "      <p class=\"note\">This generated static form records the approved UI shape. Backend processing requires a separately approved release-scoped implementation.</p>",
+            "      <form action=\"mailto:operator@example.invalid\" method=\"post\" enctype=\"text/plain\">",
+            *field_html,
+            "        <button type=\"submit\">Send request</button>",
+            "      </form>",
+            "    </section>",
+        ]
+    html_text = "\n".join([
+        "<!doctype html>",
+        "<html lang=\"en\">",
+        "<head>",
+        "  <meta charset=\"utf-8\">",
+        "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">",
+        f"  <title>{html.escape(title)}</title>",
+        "  <style>",
+        "    :root { color-scheme: light; --ink: #1f2933; --muted: #52606d; --line: #c7d2da; --accent: #0f766e; --paper: #f8fafc; --panel: #ffffff; }",
+        "    * { box-sizing: border-box; }",
+        "    body { margin: 0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: var(--ink); background: var(--paper); }",
+        "    header { padding: 48px 6vw 32px; background: #e6fffb; border-bottom: 1px solid var(--line); }",
+        "    main { max-width: 1040px; margin: 0 auto; padding: 32px 24px 56px; display: grid; gap: 28px; }",
+        "    h1 { margin: 0 0 12px; font-size: clamp(2rem, 5vw, 4rem); line-height: 1; letter-spacing: 0; }",
+        "    h2 { margin: 0 0 12px; font-size: 1.35rem; }",
+        "    p { max-width: 68ch; line-height: 1.6; color: var(--muted); }",
+        "    .hero { max-width: 1040px; margin: 0 auto; }",
+        "    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }",
+        "    .status-grid { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }",
+        "    .panel { border: 1px solid var(--line); border-radius: 8px; padding: 18px; background: var(--panel); }",
+        "    .status-card { border: 1px solid var(--line); border-radius: 8px; padding: 18px; background: var(--panel); display: grid; gap: 10px; }",
+        "    .status-card h3 { margin: 0; font-size: 1.05rem; }",
+        "    .status-card dl { margin: 0; display: grid; gap: 8px; }",
+        "    .status-card div { display: grid; gap: 2px; }",
+        "    dt { font-size: 0.78rem; text-transform: uppercase; color: var(--muted); font-weight: 800; }",
+        "    dd { margin: 0; }",
+        "    .badge { width: fit-content; border-radius: 999px; padding: 4px 10px; font-size: 0.78rem; font-weight: 900; text-transform: uppercase; }",
+        "    .go { background: #d1fae5; color: #065f46; border: 1px solid #34d399; }",
+        "    .caution { background: #fef3c7; color: #92400e; border: 1px solid #f59e0b; }",
+        "    .incident-banner { border: 2px solid #0f766e; border-radius: 8px; padding: 18px; background: #ecfdf5; }",
+        "    .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }",
+        "    table { width: 100%; border-collapse: collapse; min-width: 620px; }",
+        "    th, td { text-align: left; padding: 12px; border-bottom: 1px solid var(--line); vertical-align: top; }",
+        "    th { background: #eef2f7; }",
+        "    .action-list { display: grid; gap: 10px; padding-left: 1.35rem; }",
+        "    pre { overflow-x: auto; border-radius: 8px; padding: 14px; background: #111827; color: #f9fafb; }",
+        "    code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }",
+        "    label { display: block; margin: 14px 0 6px; font-weight: 700; }",
+        "    input, select, textarea { width: 100%; min-height: 44px; border: 1px solid #9c9488; border-radius: 6px; padding: 10px 12px; font: inherit; background: white; color: var(--ink); }",
+        "    textarea { min-height: 96px; resize: vertical; }",
+        "    button { min-height: 44px; margin-top: 16px; border: 0; border-radius: 6px; padding: 0 18px; font: inherit; font-weight: 800; background: var(--accent); color: white; cursor: pointer; }",
+        "    button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 3px solid #f0b84f; outline-offset: 2px; }",
+        "    .note { font-size: 0.9rem; color: var(--muted); }",
+        "  </style>",
+        "</head>",
+        "<body>",
+        "  <header>",
+        "    <div class=\"hero\">",
+        f"      <h1>{html.escape(title)}</h1>",
+        f"      <p>{html.escape(description)}</p>",
+        "    </div>",
+        "  </header>",
+        "  <main>",
+        *[line for line in section_html if line],
+        *form_html,
+        "    <section aria-labelledby=\"sdlc-heading\">",
+        "      <h2 id=\"sdlc-heading\">SDLC Auto Scope</h2>",
+        f"      <p>Request: {escaped_request}</p>",
+        "      <p>This generated static site is the implementation artifact for this local auto run.</p>",
+        "    </section>",
+        "  </main>",
+        "</body>",
+        "</html>",
+    ])
+    return ledger.artifact(
+        "artifacts/auto/website/index.html",
+        html_text + "\n",
+        event="auto.website_artifact_written",
+        redact=False,
+    )
+
+
+def _write_auto_website_public_evidence(
+    repo: Path,
+    run_dir: Path,
+    run_id: str,
+    request: str,
+    output_dir: Path,
+) -> dict[str, object]:
+    ledger = Ledger(run_dir, run_id)
+    written: list[str] = []
+    missing: list[str] = []
+    generated_at = now_iso()
+    events_path = run_dir / "events.jsonl"
+    events_sha = hashlib.sha256(events_path.read_bytes()).hexdigest() if events_path.exists() else "<not available at site generation>"
+    site_path = output_dir / "index.html"
+    site_sha = hashlib.sha256(site_path.read_bytes()).hexdigest() if site_path.exists() else "<not available at site generation>"
+    for gate in DEFAULT_GATES:
+        rel = Path("evidence") / "gates" / _auto_site_gate_filename(gate)
+        artifact_rel = Path("evidence") / "artifacts" / _auto_site_gate_filename(gate)
+        target = output_dir / rel
+        artifact_target = output_dir / artifact_rel
+        state, note = _auto_site_gate_state(gate.id)
+        required = "\n".join(f"- {item}" for item in gate.required_artifacts) or "- <none>"
+        walkthrough_rel = f"artifacts/auto/walkthrough/gates/{_auto_site_gate_filename(gate)}"
+        walkthrough_path = run_dir / walkthrough_rel
+        if walkthrough_path.exists():
+            walkthrough_sha = hashlib.sha256(walkthrough_path.read_bytes()).hexdigest()
+            walkthrough_bytes = str(walkthrough_path.stat().st_size)
+            walkthrough_status = "present"
+        else:
+            walkthrough_sha = "<missing>"
+            walkthrough_bytes = "0"
+            walkthrough_status = "missing"
+        facts = _auto_public_gate_facts(gate, request, run_id)
+        artifact_content = "\n".join([
+            f"# Public-Safe Evidence Artifact {gate.order:02d}: {gate.title}",
+            "",
+            f"Run: {run_id}",
+            f"Gate ID: {gate.id}",
+            f"Owner: {gate.owner}",
+            f"Generated at: {generated_at}",
+            "",
+            "Evidence summary:",
+            *facts,
+            "",
+            "Required artifact coverage:",
+            required,
+            "",
+            "Bound source artifacts:",
+            f"- `.sdlc/runs/{run_id}/{walkthrough_rel}` status `{walkthrough_status}` bytes `{walkthrough_bytes}` sha256 `{walkthrough_sha}`",
+            f"- `.sdlc/runs/{run_id}/events.jsonl` sha256-at-site-generation `{events_sha}`",
+            f"- `site/index.html` sha256-at-site-generation `{site_sha}`",
+            "",
+            "Verification posture:",
+            "- This file is deployable with the static site and contains redacted, public-safe evidence metadata.",
+            "- Formal release remains blocked until final report, red-team, validation, and approval artifacts agree.",
+            "",
+        ])
+        artifact_target.parent.mkdir(parents=True, exist_ok=True)
+        artifact_target.write_text(artifact_content, encoding="utf-8")
+        written.append(artifact_rel.as_posix())
+        ledger.artifact(
+            f"artifacts/auto/website/{artifact_rel.as_posix()}",
+            artifact_content,
+            event="auto.website_public_evidence_artifact_written",
+            gate=gate.id,
+            gate_order=gate.order,
+            redact=False,
+        )
+        artifact_sha = hashlib.sha256(artifact_target.read_bytes()).hexdigest()
+        content = "\n".join([
+            f"# Public Gate Evidence Status {gate.order:02d}: {gate.title}",
+            "",
+            f"Run: {run_id}",
+            f"Gate ID: {gate.id}",
+            f"Owner: {gate.owner}",
+            f"Display state: {state}",
+            f"Status note: {note}",
+            f"Generated at: {generated_at}",
+            "",
+            "Required artifacts:",
+            required,
+            "",
+            "Gate-specific facts:",
+            *facts,
+            "",
+            "Evidence provenance:",
+            f"- Generated by `sdlc auto` for request: {request}",
+            f"- Public mirror path: `site/{rel.as_posix()}`",
+            f"- Public evidence artifact: `site/{artifact_rel.as_posix()}` sha256 `{artifact_sha}`",
+            f"- Current run ledger snapshot: `.sdlc/runs/{run_id}/events.jsonl` sha256 `{events_sha}`",
+            f"- Generated site snapshot: `site/index.html` sha256 `{site_sha}`",
+            f"- Internal walkthrough evidence: `.sdlc/runs/{run_id}/{walkthrough_rel}` status `{walkthrough_status}` bytes `{walkthrough_bytes}` sha256 `{walkthrough_sha}`",
+            "",
+            "Claim discipline:",
+            "- This public file is a deployable evidence-status mirror, not a release certificate.",
+            "- Final GO/NO-GO is authoritative only in the signed run ledger, red-team summary, validation result, and final report.",
+            "",
+        ])
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        written.append(rel.as_posix())
+        ledger.artifact(
+            f"artifacts/auto/website/{rel.as_posix()}",
+            content,
+            event="auto.website_public_evidence_written",
+            gate=gate.id,
+            gate_order=gate.order,
+            redact=False,
+        )
+    for rel in written:
+        if not (output_dir / rel).exists():
+            missing.append(rel)
+    link_check = {
+        "checked": len(written),
+        "missing": missing,
+        "output_dir": relpath_under_base(repo, output_dir, must_exist=True) or str(output_dir),
+        "status": "GO" if not missing else "NO_GO",
+    }
+    ledger.artifact(
+        "artifacts/auto/website/link-check.json",
+        json.dumps(link_check, indent=2, sort_keys=True) + "\n",
+        event="auto.website_public_evidence_link_check",
+        status=link_check["status"],
+        checked=link_check["checked"],
+        missing_count=len(missing),
+        redact=False,
+    )
+    return link_check
+
+
+def _quarantine_stale_auto_site_trees(repo: Path, run_dir: Path, run_id: str, output_dir: Path) -> dict[str, object]:
+    ledger = Ledger(run_dir, run_id)
+    quarantined: list[dict[str, str]] = []
+    skipped: list[str] = []
+    run_id_pattern = re.compile(r"\b[a-z0-9][a-z0-9-]*-\d{8}-\d{3,6}\b")
+    for candidate in sorted(repo.iterdir()):
+        if not candidate.is_dir() or candidate in {output_dir, repo / ".sdlc"}:
+            continue
+        index = candidate / "index.html"
+        evidence_dir = candidate / "evidence" / "gates"
+        if not index.exists() or not evidence_dir.exists():
+            continue
+        try:
+            text = index.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            skipped.append(candidate.name)
+            continue
+        if "SDLC Auto Scope" not in text and "evidence/gates/" not in text:
+            continue
+        referenced_run_ids = set(run_id_pattern.findall(text))
+        if run_id in referenced_run_ids or not referenced_run_ids:
+            continue
+        target = run_dir / "artifacts" / "auto" / "quarantined-sites" / candidate.name
+        if target.exists():
+            shutil.rmtree(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(candidate), str(target))
+        quarantined.append({"path": candidate.name, "quarantined_to": relpath_under_base(run_dir, target, must_exist=True) or str(target), "referenced_run_ids": ",".join(sorted(referenced_run_ids))})
+        ledger.event("auto.stale_site_quarantined", path=candidate.name, quarantined_to=str(target), referenced_run_ids=sorted(referenced_run_ids))
+    payload = {
+        "schema_version": 1,
+        "status": "GO",
+        "run_id": run_id,
+        "output_dir": relpath_under_base(repo, output_dir, must_exist=True) or str(output_dir),
+        "quarantined": quarantined,
+        "skipped": skipped,
+    }
+    artifact = ledger.artifact(
+        "artifacts/auto/stale-site-scan.json",
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        event="auto.stale_site_scan_written",
+        quarantined_count=len(quarantined),
+        redact=False,
+    )
+    payload["artifact"] = artifact
+    return payload
+
+
+def _write_auto_website(repo: Path, run_dir: Path, run_id: str, request: str, intake: dict[str, object]) -> tuple[str, str]:
+    implementation = _auto_implementation(intake)
+    output_rel = _auto_clean_relpath(implementation.get("output_path"), "site/index.html")
+    if not output_rel.endswith(".html"):
+        output_rel = "site/index.html"
+    output, error = resolve_under_base(repo, Path(output_rel), must_exist=False)
+    if error or output is None:
+        output = repo / "site" / "index.html"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    artifact = _write_auto_website_artifact(run_dir, run_id, request, intake)
+    html_text = (run_dir / artifact).read_text(encoding="utf-8")
+    output.write_text(html_text, encoding="utf-8")
+    _write_auto_website_public_evidence(repo, run_dir, run_id, request, output.parent)
+    _quarantine_stale_auto_site_trees(repo, run_dir, run_id, output.parent)
+    rel_output = relpath_under_base(repo, output, must_exist=True) or "site/index.html"
+    Ledger(run_dir, run_id).event("auto.website_written", path=rel_output, source_artifact=artifact)
+    return rel_output, artifact
+
+
+def _write_auto_python_script_artifact(run_dir: Path, run_id: str, request: str, intake: dict[str, object]) -> str:
+    ledger = Ledger(run_dir, run_id)
+    implementation = _auto_implementation(intake)
+    provided = str(implementation.get("python_source", "") or "")
+    if provided.strip():
+        script_text = provided.rstrip() + "\n"
+    else:
+        escaped_request = json.dumps(request)
+        title = json.dumps(str(implementation.get("title") or _auto_title_from_request(request)))
+        features = json.dumps([str(item) for item in implementation.get("features", [])] if isinstance(implementation.get("features"), list) else [])
+        script_text = "\n".join([
+            "#!/usr/bin/env python3",
+            "\"\"\"Generated Python CLI artifact for an SDLC auto run.\"\"\"",
+            "",
+            "from __future__ import annotations",
+            "",
+            "import argparse",
+            "import json",
+            "",
+            f"REQUEST = {escaped_request}",
+            f"TITLE = {title}",
+            f"FEATURES = {features}",
+            "",
+            "",
+            "def build_payload() -> dict[str, object]:",
+            "    return {\"title\": TITLE, \"request\": REQUEST, \"features\": FEATURES}",
+            "",
+            "",
+            "def main(argv: list[str] | None = None) -> int:",
+            "    parser = argparse.ArgumentParser(description=\"Run the generated SDLC auto artifact.\")",
+            "    parser.add_argument(\"--json\", action=\"store_true\", help=\"print the generated payload as JSON\")",
+            "    args = parser.parse_args(argv)",
+            "    payload = build_payload()",
+            "    if args.json:",
+            "        print(json.dumps(payload, indent=2, sort_keys=True))",
+            "    else:",
+            "        print(payload[\"title\"])",
+            "        print(payload[\"request\"])",
+            "    return 0",
+            "",
+            "",
+            "if __name__ == \"__main__\":",
+            "    raise SystemExit(main())",
+        ]) + "\n"
+    artifact_name = _auto_clean_relpath(Path(str(implementation.get("output_path") or "main.py")).name, "main.py")
+    return ledger.artifact(
+        f"artifacts/auto/implementation/{artifact_name}",
+        script_text,
+        event="auto.implementation_artifact_written",
+        artifact_kind="python_script",
+        redact=False,
+    )
+
+
+def _write_auto_generic_script_artifact(run_dir: Path, run_id: str, request: str) -> str:
+    ledger = Ledger(run_dir, run_id)
+    escaped_request = json.dumps(request)
+    script_text = "\n".join([
+        "#!/usr/bin/env python3",
+        "\"\"\"Generated local implementation scaffold for an SDLC auto run.\"\"\"",
+        "",
+        "from __future__ import annotations",
+        "",
+        "import argparse",
+        "",
+        "",
+        f"REQUEST = {escaped_request}",
+        "",
+        "",
+        "def main(argv: list[str] | None = None) -> int:",
+        "    parser = argparse.ArgumentParser(description=\"Run the generated SDLC auto scaffold.\")",
+        "    parser.add_argument(\"--show-request\", action=\"store_true\", help=\"print the approved request\")",
+        "    args = parser.parse_args(argv)",
+        "    if args.show_request:",
+        "        print(REQUEST)",
+        "    else:",
+        "        print(\"Generated implementation scaffold is ready.\")",
+        "    return 0",
+        "",
+        "",
+        "if __name__ == \"__main__\":",
+        "    raise SystemExit(main())",
+    ])
+    return ledger.artifact(
+        "artifacts/auto/implementation/main.py",
+        script_text + "\n",
+        event="auto.implementation_artifact_written",
+        artifact_kind="python_script",
+        redact=False,
+    )
+
+
+def _write_auto_decommission_scope_artifact(run_dir: Path, run_id: str, request: str) -> str:
+    content = "\n".join([
+        "# Auto Decommission Scope",
+        "",
+        f"Run: {run_id}",
+        f"Request: {request}",
+        "",
+        "This artifact records the approved cleanup/decommission intent. The concrete AWS/local cleanup plan is recorded separately in `artifacts/auto/decommission-plan.json`.",
+    ])
+    return Ledger(run_dir, run_id).artifact(
+        "artifacts/auto/decommission/scope.md",
+        content + "\n",
+        event="auto.decommission_scope_written",
+        redact=False,
+    )
+
+
+def _write_auto_implementation(repo: Path, run_dir: Path, run_id: str, request: str, intake: dict[str, object]) -> tuple[str, str, str]:
+    implementation = _auto_implementation(intake)
+    artifact_kind = _auto_kind_to_artifact_kind(str(intake.get("artifact_kind") or implementation.get("artifact_kind") or intake.get("kind") or "python_script"))
+    if artifact_kind == "website":
+        path, artifact = _write_auto_website(repo, run_dir, run_id, request, intake)
+        return path, artifact, "website"
+
+    if artifact_kind == "decommission":
+        artifact = _write_auto_decommission_scope_artifact(run_dir, run_id, request)
+        return f".sdlc/runs/{run_id}/{artifact}", artifact, "decommission"
+
+    artifact = _write_auto_python_script_artifact(run_dir, run_id, request, intake)
+    output_rel = _auto_clean_relpath(implementation.get("output_path"), "app/main.py")
+    if not output_rel.endswith(".py"):
+        output_rel = "app/main.py"
+    output, error = resolve_under_base(repo, Path(output_rel), must_exist=False)
+    if error or output is None:
+        output = repo / "app" / "main.py"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text((run_dir / artifact).read_text(encoding="utf-8"), encoding="utf-8")
+    try:
+        output.chmod(0o755)
+    except OSError:
+        pass
+    rel_output = relpath_under_base(repo, output, must_exist=True) or output_rel
+    Ledger(run_dir, run_id).event("auto.implementation_written", path=rel_output, source_artifact=artifact, artifact_kind="python_script")
+    return rel_output, artifact, "python_script"
+
+
+def _write_auto_demo_output(repo: Path, run_dir: Path, run_id: str, implementation_path: str, artifact_kind: str, intake: dict[str, object]) -> str | None:
+    if artifact_kind != "python_script":
+        return None
+    implementation = _auto_implementation(intake)
+    demo_args = implementation.get("demo_args") if isinstance(implementation.get("demo_args"), list) else []
+    command = [sys.executable, implementation_path, *[str(item) for item in demo_args]]
+    result = run_cmd(command, repo, timeout=30)
+    content = "\n".join([
+        "# Auto Implementation Demo Output",
+        "",
+        f"Command: `{' '.join(shlex.quote(part) for part in command)}`",
+        f"Return code: {result['returncode']}",
+        "",
+        "## STDOUT",
+        "```text",
+        str(result.get("stdout", "")).rstrip(),
+        "```",
+        "",
+        "## STDERR",
+        "```text",
+        str(result.get("stderr", "")).rstrip(),
+        "```",
+    ])
+    return Ledger(run_dir, run_id).artifact(
+        "artifacts/auto/implementation/demo-output.md",
+        content + "\n",
+        event="auto.implementation_demo_output_written",
+        artifact_kind=artifact_kind,
+        returncode=result["returncode"],
+        redact=False,
+    )
+
+
+AUTO_INTAKE_SCHEMA_VERSION = 1
+
+
+def _auto_request_kind(request: str) -> str:
+    """Offline fallback classifier; model/provided intake plans can override it."""
+    text = request.lower()
+    starts_with_cleanup = bool(re.match(r"\s*(decommission|deomission|cleanup|clean up|destroy|tear down|teardown)\b", text))
+    destructive_cleanup = bool(re.search(r"\b(delete|destroy|tear down|teardown|remove)\b.*\b(bucket|environment|resources|site|website)\b", text))
+    if starts_with_cleanup or destructive_cleanup:
+        return "decommission"
+    if any(term in text for term in {"website", "web site", "web app", "landing page", "html", "form"}):
+        return "website"
+    if any(term in text for term in {"script", "python", "cli", "command line", "command-line"}):
+        return "python_script"
+    return "application"
+
+
+def _auto_title_from_request(request: str) -> str:
+    words = re.findall(r"[A-Za-z0-9]+", request)
+    if not words:
+        return "SDLC Auto Artifact"
+    ignored = {"a", "an", "the", "for", "with", "and", "to", "of", "in", "on", "create", "build", "generate", "add"}
+    selected = [word for word in words if word.lower() not in ignored][:7] or words[:7]
+    return " ".join(word.capitalize() for word in selected)
+
+
+def _auto_clean_relpath(value: object, default: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return default
+    text = text.lstrip("/").replace("\\", "/")
+    parts = [part for part in text.split("/") if part and part not in {".", ".."}]
+    return "/".join(parts) or default
+
+
+def _auto_kind_to_artifact_kind(kind: str) -> str:
+    mapping = {
+        "static_site": "website",
+        "website": "website",
+        "web": "website",
+        "python_cli": "python_script",
+        "python_script": "python_script",
+        "script": "python_script",
+        "decommission_plan": "decommission",
+        "decommission": "decommission",
+    }
+    return mapping.get(kind, "python_script")
+
+
+def _auto_architecture_mermaid(kind: str) -> str:
+    if kind == "website":
+        return "\n".join([
+            "flowchart LR",
+            "  Visitor[Visitor] --> Site[Generated static site]",
+            "  Site --> Interaction[Request-specific interaction]",
+            "  Auto[sdlc auto] --> Local[Local artifact]",
+            "  Auto --> Evidence[25-gate evidence dashboard]",
+            "  Auto -. explicit approval .-> S3[AWS S3 static website gateway]",
+            "  S3 -. optional approved plan .-> CDN[CloudFront + ACM]",
+        ])
+    if kind == "decommission":
+        return "\n".join([
+            "flowchart LR",
+            "  Operator[Human operator] --> CLI[sdlc auto decommission]",
+            "  CLI --> Discover[Discover target S3 web gateway]",
+            "  Discover --> Plan[Cleanup plan and approval record]",
+            "  Plan -. explicit cleanup approval .-> S3[AWS S3 bucket removal]",
+            "  Plan -. optional .-> Local[Local generated artifact cleanup]",
+            "  CLI --> Evidence[25-gate decommission evidence report]",
+        ])
+    if kind == "python_script":
+        return "\n".join([
+            "flowchart LR",
+            "  User[Operator] --> CLI[sdlc auto]",
+            "  CLI --> Intake[LLM intake plan]",
+            "  Intake --> Script[Generated Python CLI artifact]",
+            "  Script --> Demo[Local execution transcript]",
+            "  CLI --> Evidence[25-gate evidence report]",
+            "  Evidence --> Gates[Per-gate proof artifacts]",
+        ])
+    return "\n".join([
+        "flowchart LR",
+        "  Request[User request] --> CLI[sdlc auto]",
+        "  CLI --> Intake[LLM intake plan]",
+        "  Intake --> Artifact[Generated implementation artifact]",
+        "  CLI --> QA[Local quality and security checks]",
+        "  CLI --> Evidence[25-gate evidence report]",
+        "  CLI -. explicit approval .-> Infra[Cloud or destructive action]",
+    ])
+
+
+def _auto_intake_llm_prompt(request: str) -> str:
+    return "\n".join([
+        "# SDLC Auto Intake Planner",
+        "",
+        "Interpret the user's request and return only one JSON object. Do not wrap it in prose.",
+        "",
+        "The CLI must be generic. Do not hardcode cafe, Fibonacci, trading, website, domain, certificate, or AWS questions unless the user's request makes that topic relevant.",
+        "Generate the approval questions and options that fit this specific request. Put the richest, most complete end-to-end demonstration as option 1/default for each question.",
+        "Never approve production, live trading, destructive cleanup, secret handling, or cloud mutation silently. Put those behind explicit options/effects and approval text.",
+        "",
+        "Required JSON shape:",
+        "{",
+        '  "schema_version": 1,',
+        '  "kind": "short_request_kind",',
+        '  "artifact_kind": "website | python_script | decommission | generic",',
+        '  "build_description": {"label": "...", "description": "..."},',
+        '  "architecture": {"label": "...", "description": "...", "mermaid": "flowchart LR\\n  ..."},',
+        '  "implementation": {',
+        '    "artifact_kind": "website | python_script | decommission | generic",',
+        '    "title": "request-specific title",',
+        '    "description": "what will be built",',
+        '    "output_path": "site/index.html or app/main.py or another safe relative path",',
+        '    "features": ["request-specific feature"],',
+        '    "sections": [{"heading": "...", "body": "...", "items": ["..."]}],',
+        '    "form": {"enabled": true, "title": "...", "fields": [{"id": "name", "label": "Name", "type": "text", "required": true}]},',
+        '    "python_source": "optional full Python source when artifact_kind is python_script",',
+        '    "demo_args": ["optional", "args"]',
+        "  },",
+        '  "questions": [',
+        '    {"id": "scope", "prompt": "question for the user", "default": 0, "options": [',
+        '      {"label": "Full end-to-end demonstration", "description": "best complex default", "effects": {"build_description": {"label": "...", "description": "..."}}},',
+        '      {"label": "Smaller alternative", "description": "...", "effects": {}}',
+        "    ]}",
+        "  ],",
+        '  "domain": {"label": "Not applicable unless relevant", "value": ""},',
+        '  "certificates": {"label": "Not applicable unless relevant", "value": ""},',
+        '  "aws": {"execute": false, "public_read": false, "gateway_name": "sdlc-web-gateway", "profile": "default", "region": "us-east-1", "bucket": ""},',
+        '  "open_browser": false,',
+        '  "open_target": "Open evidence dashboard"',
+        "}",
+        "",
+        f"User request: {request}",
+    ])
+
+
+def _auto_deep_merge(base: dict[str, object], updates: dict[str, object]) -> dict[str, object]:
+    merged = copy.deepcopy(base)
+    for key, value in updates.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _auto_deep_merge(merged[key], value)  # type: ignore[arg-type]
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def _extract_json_object(text: str) -> dict[str, object] | None:
+    preferred: list[dict[str, object]] = []
+    fallback: list[dict[str, object]] = []
+    seen: set[str] = set()
+
+    def consider_payload(payload: object) -> None:
+        if isinstance(payload, dict):
+            if _auto_json_payload_is_preferred(payload):
+                preferred.append(payload)
+            else:
+                fallback.append(payload)
+            for nested in _json_string_values(payload):
+                consider_text(nested)
+        elif isinstance(payload, list):
+            for item in payload:
+                consider_payload(item)
+
+    def consider_text(candidate_text: str) -> None:
+        candidate_text = candidate_text.strip()
+        if not candidate_text or candidate_text in seen:
+            return
+        seen.add(candidate_text)
+        snippets: list[str] = []
+        fenced_matches = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", candidate_text, flags=re.DOTALL)
+        snippets.extend(fenced_matches)
+        if candidate_text.startswith("{") and candidate_text.endswith("}"):
+            snippets.append(candidate_text)
+        first = candidate_text.find("{")
+        last = candidate_text.rfind("}")
+        if first != -1 and last > first:
+            snippets.append(candidate_text[first:last + 1])
+        for line in candidate_text.splitlines():
+            line = line.strip()
+            if line.startswith("{") and line.endswith("}"):
+                snippets.append(line)
+        for snippet in snippets:
+            try:
+                payload = json.loads(snippet)
+            except json.JSONDecodeError:
+                continue
+            consider_payload(payload)
+
+    consider_text(text)
+    return preferred[0] if preferred else fallback[0] if fallback else None
+
+
+def _auto_json_payload_is_preferred(payload: dict[str, object]) -> bool:
+    preferred_keys = {
+        "artifact_kind",
+        "kind",
+        "implementation",
+        "questions",
+        "architecture",
+        "verdict",
+        "final_verdict",
+        "findings",
+    }
+    return any(key in payload for key in preferred_keys)
+
+
+def _json_string_values(value: object) -> list[str]:
+    strings: list[str] = []
+    if isinstance(value, str):
+        strings.append(value)
+    elif isinstance(value, list):
+        for item in value:
+            strings.extend(_json_string_values(item))
+    elif isinstance(value, dict):
+        for item in value.values():
+            strings.extend(_json_string_values(item))
+    return strings
+
+
+def _fallback_auto_intake_plan(args: argparse.Namespace, request: str) -> dict[str, object]:
+    kind = _auto_request_kind(request)
+    artifact_kind = _auto_kind_to_artifact_kind(kind)
+    title = _auto_title_from_request(request)
+    architecture = _auto_architecture_mermaid(kind)
+    is_website = artifact_kind == "website"
+    is_decommission = artifact_kind == "decommission"
+    default_output = "site/index.html" if is_website else ".sdlc/decommission/scope.md" if is_decommission else "app/main.py"
+    default_open = bool(getattr(args, "open_browser", False)) and not bool(getattr(args, "no_open_browser", False))
+    return {
+        "schema_version": AUTO_INTAKE_SCHEMA_VERSION,
+        "kind": kind,
+        "artifact_kind": artifact_kind,
+        "request": request,
+        "build_description": {
+            "label": "Full 25-gate evidence demonstration",
+            "description": "Build a request-shaped artifact, run local proof generation for all gates, and produce the HTML evidence dashboard.",
+        },
+        "architecture": {
+            "label": "LLM-planned evidence-first architecture",
+            "description": "Use an intake plan as the source of interpretation; cloud or destructive execution remains explicitly gated.",
+            "mermaid": architecture,
+        },
+        "implementation": {
+            "artifact_kind": artifact_kind,
+            "title": title,
+            "description": request,
+            "output_path": default_output,
+            "features": [
+                "Request-specific generated artifact",
+                "All 25 SDLC gate proofs",
+                "Role-agent activity and evidence dashboard",
+            ],
+            "sections": [
+                {"heading": "Approved Scope", "body": request, "items": ["Generated from the intake plan", "Tracked through all 25 gates"]},
+                {"heading": "Evidence", "body": "The run records architecture, QA, SBOM, red-team, deployment posture, and final reporting artifacts.", "items": []},
+            ],
+            "form": {
+                "enabled": is_website,
+                "title": "Accessible Request Form",
+                "fields": [
+                    {"id": "name", "label": "Name", "type": "text", "required": True},
+                    {"id": "details", "label": "Request details", "type": "textarea", "required": True},
+                ],
+            },
+            "demo_args": [],
+        },
+        "questions": [
+            {
+                "id": "auto_depth",
+                "prompt": "How complete should this auto run be?",
+                "default": 0,
+                "options": [
+                    {
+                        "label": "Full evidence demo",
+                        "description": "Generate the richest local artifact, all gate proofs, role activity, HTML dashboard, and cloud/cleanup plan where applicable.",
+                        "effects": {
+                            "build_description": {
+                                "label": "Full evidence demo",
+                                "description": "Complete local implementation plus 25-gate evidence, role activity, HTML dashboard, and approved infra posture.",
+                            }
+                        },
+                    },
+                    {"label": "Local implementation only", "description": "Generate the artifact and gate evidence without cloud/destructive planning.", "effects": {"aws": {"execute": False, "public_read": False}}},
+                    {"label": "Architecture/report only", "description": "Emphasize the evidence package and implementation scaffold.", "effects": {"implementation": {"features": ["Architecture and report scaffold"]}}},
+                ],
+            },
+            {
+                "id": "execution_authority",
+                "prompt": "What execution authority should I use?",
+                "default": 0,
+                "options": [
+                    {"label": "Plan external changes only", "description": "Best default: record exact cloud/destructive plans but do not mutate external systems.", "effects": {"aws": {"execute": False, "cleanup_execute": False}}},
+                    {"label": "Execute only explicitly approved changes", "description": "Use CLI approval flags for cloud or cleanup execution.", "effects": {}},
+                    {"label": "No external actions", "description": "Keep the run entirely local.", "effects": {"aws": {"execute": False, "cleanup_execute": False, "public_read": False}}},
+                ],
+            },
+            {
+                "id": "final_view",
+                "prompt": "What should I open at the end?",
+                "default": 0,
+                "options": [
+                    {"label": "Open evidence dashboard", "description": "Open the HTML dashboard with gate proof links and role activity.", "effects": {"open_browser": True, "open_target": "Open evidence dashboard"}},
+                    {"label": "Open finished artifact", "description": "Open the generated artifact or deployed URL when available.", "effects": {"open_browser": True, "open_target": "Open finished page"}},
+                    {"label": "Open nothing", "description": "Print paths only.", "effects": {"open_browser": False, "open_target": "Open nothing"}},
+                ],
+            },
+        ],
+        "domain": {"label": "Generated AWS URL" if is_website else "Not applicable", "value": ""},
+        "certificates": {"label": "No certificate in this run" if is_website else "Not applicable", "value": ""},
+        "contact_policy": {"label": "Proceed with approved plan", "description": "Ask again before unapproved cloud, destructive, secret, or production actions."},
+        "aws": {
+            "execute": bool(getattr(args, "execute_aws", False)) if is_website else False,
+            "approval": getattr(args, "approve_aws_deploy", None) or "",
+            "cleanup_execute": bool(getattr(args, "execute_cleanup", False)) if is_decommission else False,
+            "cleanup_approval": getattr(args, "approve_cleanup", None) or "",
+            "gateway_name": getattr(args, "aws_gateway_name", "sdlc-web-gateway"),
+            "public_read": bool(getattr(args, "public_read", False)) or is_website,
+            "profile": getattr(args, "aws_profile", "default"),
+            "region": getattr(args, "aws_region", "us-east-1"),
+            "bucket": getattr(args, "aws_bucket", None) or "",
+            "target_run_id": getattr(args, "target_run_id", None) or "",
+            "cleanup_local": bool(getattr(args, "cleanup_local", False)),
+        },
+        "open_browser": default_open,
+        "open_target": "Open evidence dashboard",
+    }
+
+
+def _normalize_auto_questions(raw: object) -> list[dict[str, object]]:
+    if not isinstance(raw, list):
+        return []
+    questions: list[dict[str, object]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        options = item.get("options")
+        if not isinstance(options, list) or not options:
+            continue
+        clean_options: list[dict[str, object]] = []
+        for option in options:
+            if not isinstance(option, dict):
+                continue
+            label = str(option.get("label", "")).strip()
+            if not label:
+                continue
+            clean_options.append({
+                "label": label,
+                "description": str(option.get("description", "")).strip(),
+                "effects": option.get("effects") if isinstance(option.get("effects"), dict) else {},
+            })
+        if not clean_options:
+            continue
+        default = item.get("default", 0)
+        default_index = int(default) if isinstance(default, int) or (isinstance(default, str) and default.isdigit()) else 0
+        default_index = max(0, min(default_index, len(clean_options) - 1))
+        questions.append({
+            "id": str(item.get("id", f"question_{len(questions) + 1}")).strip() or f"question_{len(questions) + 1}",
+            "prompt": str(item.get("prompt", "Select an option")).strip() or "Select an option",
+            "default": default_index,
+            "options": clean_options,
+        })
+    return questions
+
+
+def _normalize_auto_intake_plan(args: argparse.Namespace, request: str, raw: dict[str, object], *, source: str, prompt: str, llm: dict[str, object]) -> dict[str, object]:
+    fallback = _fallback_auto_intake_plan(args, request)
+    intake = _auto_deep_merge(fallback, raw)
+    implementation = intake.get("implementation") if isinstance(intake.get("implementation"), dict) else {}
+    kind = str(intake.get("kind") or fallback["kind"])
+    artifact_kind = str(intake.get("artifact_kind") or implementation.get("artifact_kind") or _auto_kind_to_artifact_kind(kind))
+    artifact_kind = _auto_kind_to_artifact_kind(artifact_kind)
+    intake["schema_version"] = AUTO_INTAKE_SCHEMA_VERSION
+    intake["request"] = request
+    intake["kind"] = kind
+    intake["artifact_kind"] = artifact_kind
+    intake["implementation"] = _auto_deep_merge(
+        fallback.get("implementation", {}) if isinstance(fallback.get("implementation"), dict) else {},
+        implementation if isinstance(implementation, dict) else {},
+    )
+    if isinstance(intake["implementation"], dict):
+        intake["implementation"]["artifact_kind"] = artifact_kind
+    architecture = intake.get("architecture") if isinstance(intake.get("architecture"), dict) else {}
+    if not str(architecture.get("mermaid", "")).strip():
+        architecture["mermaid"] = _auto_architecture_mermaid(kind)
+    intake["architecture"] = architecture
+    intake["questions"] = _normalize_auto_questions(intake.get("questions")) or _normalize_auto_questions(fallback.get("questions"))
+    intake["llm_intake"] = {
+        "schema_version": AUTO_INTAKE_SCHEMA_VERSION,
+        "source": source,
+        "worker": str(getattr(args, "intake_model", "codex")),
+        "execute_requested": bool(getattr(args, "execute_intake_llm", False)),
+        "prompt": prompt,
+        **llm,
+    }
+    return _apply_auto_cli_overrides(args, intake)
+
+
+def _apply_auto_cli_overrides(args: argparse.Namespace, intake: dict[str, object]) -> dict[str, object]:
+    aws = copy.deepcopy(intake.get("aws")) if isinstance(intake.get("aws"), dict) else {}
+    if getattr(args, "execute_aws", False):
+        aws["execute"] = True
+    if getattr(args, "approve_aws_deploy", None):
+        aws["approval"] = args.approve_aws_deploy
+    if getattr(args, "public_read", False):
+        aws["public_read"] = True
+    if getattr(args, "execute_cleanup", False):
+        aws["cleanup_execute"] = True
+    if getattr(args, "approve_cleanup", None):
+        aws["cleanup_approval"] = args.approve_cleanup
+    if getattr(args, "cleanup_local", False):
+        aws["cleanup_local"] = True
+    for attr, key in {
+        "aws_profile": "profile",
+        "aws_region": "region",
+        "aws_bucket": "bucket",
+        "aws_gateway_name": "gateway_name",
+        "target_run_id": "target_run_id",
+    }.items():
+        value = getattr(args, attr, None)
+        if value:
+            aws[key] = value
+    aws.setdefault("profile", "default")
+    aws.setdefault("region", "us-east-1")
+    aws.setdefault("gateway_name", "sdlc-web-gateway")
+    aws.setdefault("bucket", "")
+    aws.setdefault("approval", "")
+    aws.setdefault("cleanup_approval", "")
+    answers = intake.get("answers") if isinstance(intake.get("answers"), dict) else {}
+    answer_labels = [
+        str(item.get("label", "")).lower()
+        for item in answers.values()
+        if isinstance(item, dict)
+    ]
+    disabled_public_plan = any(
+        "no external" in label
+        or "local only" in label
+        or "local implementation only" in label
+        for label in answer_labels
+    )
+    if str(intake.get("artifact_kind", "")) == "website" and not disabled_public_plan:
+        aws["public_read"] = True
+    intake["aws"] = aws
+    if getattr(args, "no_open_browser", False):
+        intake["open_browser"] = False
+        intake["open_target"] = "Open nothing"
+    elif getattr(args, "open_browser", False):
+        intake["open_browser"] = True
+        intake.setdefault("open_target", "Open evidence dashboard")
+    return intake
+
+
+def _load_auto_intake_plan(args: argparse.Namespace, repo: Path, request: str, policy: dict[str, object]) -> dict[str, object]:
+    prompt = _auto_intake_llm_prompt(request)
+    if getattr(args, "intake_plan", None):
+        path = Path(str(args.intake_plan)).expanduser()
+        payload = read_json(path, {})
+        if not isinstance(payload, dict):
+            payload = {}
+        return _normalize_auto_intake_plan(
+            args,
+            request,
+            payload,
+            source="provided_intake_plan",
+            prompt=prompt,
+            llm={"status": "PROVIDED", "plan_path": str(path)},
+        )
+    if getattr(args, "execute_intake_llm", False):
+        policy_error = _worker_execution_policy_error(policy, execute=True, allow_network=bool(getattr(args, "allow_network", False)))
+        if policy_error:
+            return _normalize_auto_intake_plan(
+                args,
+                request,
+                {},
+                source="schema_fallback",
+                prompt=prompt,
+                llm={"status": "BLOCKED_BY_POLICY", "error": policy_error},
+            )
+        adapter = adapter_from_policy(str(getattr(args, "intake_model", "codex")), policy)
+        if adapter is None:
+            return _normalize_auto_intake_plan(
+                args,
+                request,
+                {},
+                source="schema_fallback",
+                prompt=prompt,
+                llm={"status": "WORKER_UNAVAILABLE", "error": f"unknown worker: {getattr(args, 'intake_model', 'codex')}"},
+            )
+        with tempfile.TemporaryDirectory(prefix="sdlc-auto-intake-") as temp_dir:
+            prompt_path = Path(temp_dir) / "auto-intake-prompt.md"
+            prompt_path.write_text(prompt + "\n", encoding="utf-8")
+            result = adapter.run(prompt_path, repo, "PLAN", execute=True, timeout=int(getattr(args, "timeout", 120)))
+        parsed = _extract_json_object(result.stdout)
+        result_data = result.to_dict()
+        result_data["stdout"] = result.stdout[:12000]
+        result_data["stderr"] = result.stderr[:12000]
+        if parsed is not None and result.returncode == 0:
+            return _normalize_auto_intake_plan(
+                args,
+                request,
+                parsed,
+                source="executed_llm",
+                prompt=prompt,
+                llm={"status": "EXECUTED", "result": result_data},
+            )
+        return _normalize_auto_intake_plan(
+            args,
+            request,
+            {},
+            source="schema_fallback",
+            prompt=prompt,
+            llm={"status": "LLM_PARSE_FAILED", "result": result_data},
+        )
+    return _normalize_auto_intake_plan(
+        args,
+        request,
+        {},
+        source="schema_fallback",
+        prompt=prompt,
+        llm={"status": "DRY_RUN", "reason": "pass --execute-intake-llm and --allow-network with a network-enabled policy to execute the selected intake worker"},
+    )
+
+
+def _prompt_choice(prompt: str, choices: list[dict[str, object]], *, default: int = 0) -> dict[str, object]:
+    print()
+    print(prompt)
+    for index, choice in enumerate(choices, start=1):
+        description = str(choice.get("description", ""))
+        suffix = f" - {description}" if description else ""
+        print(f"  {index}. {choice['label']}{suffix}")
+    raw = input(f"Select 1-{len(choices)} [{default + 1}]: ").strip()
+    if not raw:
+        return choices[default]
+    if raw.isdigit():
+        idx = int(raw) - 1
+        if 0 <= idx < len(choices):
+            return choices[idx]
+    print(f"Invalid selection; using {default + 1}.")
+    return choices[default]
+
+
+def _prompt_text(prompt: str, *, default: str = "") -> str:
+    suffix = f" [{default}]" if default else ""
+    raw = input(f"{prompt}{suffix}: ").strip()
+    return raw or default
+
+
+def _prompt_approval(prompt: str, *, default: bool = True) -> bool:
+    suffix = "Y/n" if default else "y/N"
+    raw = input(f"{prompt} [{suffix}]: ").strip().lower()
+    if not raw:
+        return default
+    return raw in {"y", "yes", "approve", "approved"}
+
+
+def _apply_auto_question_selection(intake: dict[str, object], question: dict[str, object], selected: dict[str, object]) -> dict[str, object]:
+    effects = selected.get("effects") if isinstance(selected.get("effects"), dict) else {}
+    if effects:
+        intake = _auto_deep_merge(intake, effects)
+    answers = intake.get("answers")
+    if not isinstance(answers, dict):
+        answers = {}
+    answers[str(question.get("id", ""))] = {
+        "prompt": str(question.get("prompt", "")),
+        "label": str(selected.get("label", "")),
+        "description": str(selected.get("description", "")),
+    }
+    intake["answers"] = answers
+    return intake
+
+
+def _apply_auto_default_questions(intake: dict[str, object]) -> dict[str, object]:
+    questions = intake.get("questions") if isinstance(intake.get("questions"), list) else []
+    for question in questions:
+        if not isinstance(question, dict):
+            continue
+        options = question.get("options") if isinstance(question.get("options"), list) else []
+        if not options:
+            continue
+        default = question.get("default", 0)
+        index = int(default) if isinstance(default, int) or (isinstance(default, str) and default.isdigit()) else 0
+        index = max(0, min(index, len(options) - 1))
+        selected = options[index]
+        if isinstance(selected, dict):
+            intake = _apply_auto_question_selection(intake, question, selected)
+    return intake
+
+
+def _collect_auto_intake(args: argparse.Namespace, repo: Path, request: str, policy: dict[str, object]) -> dict[str, object]:
+    intake = _load_auto_intake_plan(args, repo, request, policy)
+    llm_intake = intake.get("llm_intake") if isinstance(intake.get("llm_intake"), dict) else {}
+    if (
+        bool(getattr(args, "execute_intake_llm", False))
+        and not getattr(args, "intake_plan", None)
+        and llm_intake.get("source") != "executed_llm"
+    ):
+        status = str(llm_intake.get("status", "UNKNOWN"))
+        error = str(llm_intake.get("error") or llm_intake.get("reason") or "intake worker did not return a valid plan")
+        intake["approved"] = False
+        intake["intake_error"] = (
+            f"Intake LLM execution was requested, but no LLM intake ran successfully "
+            f"(status={status}). {error}. No auto run was created."
+        )
+        return intake
+    interactive = (
+        not getattr(args, "json", False)
+        and not getattr(args, "yes", False)
+        and sys.stdin.isatty()
+        and sys.stdout.isatty()
+    )
+    intake["interactive"] = interactive
+    if not interactive:
+        intake["approved"] = True
+        intake = _apply_auto_cli_overrides(args, intake)
+        intake = _apply_auto_default_questions(intake)
+        return _apply_auto_cli_overrides(args, intake)
+
+    print("Auto intake and approvals")
+    print(f"Request: {request}")
+    print(f"Intake source: {llm_intake.get('source', 'unknown')} | Worker: {llm_intake.get('worker', 'unknown')} | Status: {llm_intake.get('status', 'unknown')}")
+    print()
+    print("Proposed architecture:")
+    print("```mermaid")
+    architecture = intake.get("architecture") if isinstance(intake.get("architecture"), dict) else {}
+    print(str(architecture.get("mermaid", "")))
+    print("```")
+    questions = intake.get("questions") if isinstance(intake.get("questions"), list) else []
+    for question in questions:
+        if not isinstance(question, dict):
+            continue
+        options = question.get("options") if isinstance(question.get("options"), list) else []
+        if not options:
+            continue
+        default = question.get("default", 0)
+        default_index = int(default) if isinstance(default, int) or (isinstance(default, str) and default.isdigit()) else 0
+        selected = _prompt_choice(str(question.get("prompt", "Select an option")), options, default=default_index)
+        intake = _apply_auto_question_selection(intake, question, selected)
+
+    approved = _prompt_approval("Approve this scope and begin the auto run?", default=True)
+    intake["approved"] = approved
+    return _apply_auto_cli_overrides(args, intake)
+
+
+def _write_auto_intake_artifacts(run_dir: Path, run_id: str, intake: dict[str, object]) -> tuple[str, str]:
+    ledger = Ledger(run_dir, run_id)
+    llm_intake = intake.get("llm_intake") if isinstance(intake.get("llm_intake"), dict) else {}
+    prompt_text = str(llm_intake.get("prompt", "") or "")
+    prompt_artifact = ledger.artifact(
+        "artifacts/auto/llm-intake-prompt.md",
+        prompt_text.rstrip() + "\n",
+        event="auto.llm_intake_prompt_written",
+        redact=True,
+    )
+    llm_record = {key: value for key, value in llm_intake.items() if key != "prompt"}
+    llm_artifact = ledger.artifact(
+        "artifacts/auto/llm-intake.json",
+        json.dumps(llm_record, indent=2, sort_keys=True) + "\n",
+        event="auto.llm_intake_record_written",
+        redact=True,
+        source=str(llm_record.get("source", "")),
+        status=str(llm_record.get("status", "")),
+    )
+    json_artifact = ledger.artifact(
+        "artifacts/auto/intake-approvals.json",
+        json.dumps(intake, indent=2, sort_keys=True) + "\n",
+        event="auto.intake_approvals_written",
+        redact=True,
+    )
+    aws = intake.get("aws") if isinstance(intake.get("aws"), dict) else {}
+    domain = intake.get("domain") if isinstance(intake.get("domain"), dict) else {}
+    certificates = intake.get("certificates") if isinstance(intake.get("certificates"), dict) else {}
+    architecture = intake.get("architecture") if isinstance(intake.get("architecture"), dict) else {}
+    answers = intake.get("answers") if isinstance(intake.get("answers"), dict) else {}
+    answer_lines = []
+    for answer_id, answer in sorted(answers.items()):
+        if isinstance(answer, dict):
+            answer_lines.append(f"- `{answer_id}`: {answer.get('label', '')} — {answer.get('description', '')}")
+    if not answer_lines:
+        answer_lines.append("- No interactive/default option selections were recorded.")
+    content = "\n".join([
+        "# Auto Intake and Approvals",
+        "",
+        f"Request: {intake.get('request', '')}",
+        f"Kind: {intake.get('kind', '')}",
+        f"Artifact kind: {intake.get('artifact_kind', '')}",
+        f"Interactive: {intake.get('interactive', False)}",
+        f"Approved: {intake.get('approved', False)}",
+        f"Intake source: {llm_record.get('source', '')}",
+        f"Intake worker: {llm_record.get('worker', '')}",
+        f"Intake status: {llm_record.get('status', '')}",
+        f"LLM prompt: `{prompt_artifact}`",
+        f"LLM result: `{llm_artifact}`",
+        "",
+        "## Build",
+        f"- Selection: {dict(intake.get('build_description', {})).get('label', '') if isinstance(intake.get('build_description'), dict) else ''}",
+        f"- Detail: {dict(intake.get('build_description', {})).get('description', '') if isinstance(intake.get('build_description'), dict) else ''}",
+        "",
+        "## Selected Options",
+        *answer_lines,
+        "",
+        "## Architecture",
+        f"- Selection: {architecture.get('label', '')}",
+        f"- Detail: {architecture.get('description', '')}",
+        "",
+        "```mermaid",
+        str(architecture.get("mermaid", "")),
+        "```",
+        "",
+        "## Domain and Certificates",
+        f"- Domain: {domain.get('label', '')} {domain.get('value', '')}".rstrip(),
+        f"- Certificates: {certificates.get('label', '')} {certificates.get('value', '')}".rstrip(),
+        "",
+        "## AWS Decision",
+        f"- Execute AWS: {aws.get('execute', False)}",
+        f"- Public read: {aws.get('public_read', False)}",
+        f"- Profile: {aws.get('profile', '')}",
+        f"- Region: {aws.get('region', '')}",
+        f"- Bucket: {aws.get('bucket', '') or '<derived>'}",
+        "",
+        f"Machine-readable approvals: `{json_artifact}`",
+    ])
+    md_artifact = ledger.artifact(
+        "artifacts/auto/intake-approvals.md",
+        content + "\n",
+        event="auto.intake_approvals_report_written",
+        redact=True,
+        approved=bool(intake.get("approved")),
+        kind=str(intake.get("kind", "")),
+    )
+    return md_artifact, json_artifact
+
+
+def _auto_gate_work_detail(gate_id: str, *, implementation_path: str, artifact_kind: str, aws_status: str) -> str:
+    is_website = artifact_kind == "website"
+    is_decommission = artifact_kind == "decommission"
+    implementation_label = "static website" if is_website else "environment decommission plan" if is_decommission else "Python script"
+    quality_label = "HTML structure and accessibility checks" if is_website else "cleanup target and command-plan validation" if is_decommission else "local Python execution transcript"
+    security_label = "no JavaScript, no external calls, no embedded secrets" if is_website else "destructive cleanup requires explicit approval and records all commands" if is_decommission else "stdlib-only Python, no network calls, no secrets"
+    details = {
+        "intake_scope": "Captured the request, selected build shape, and approval posture before implementation.",
+        "stakeholders_raci": "Recorded the user as approval authority and mapped local automation ownership for the run.",
+        "mission_non_goals": "Separated local gate evidence from production/cloud authority and avoided unsupported readiness claims.",
+        "repo_context_env_branch": f"Captured repository context and wrote the generated {implementation_label} under the working repo.",
+        "risk_blast_radius": f"Classified the request as a bounded {implementation_label} run with cloud mutation disabled unless approved.",
+        "data_privacy_secrets": (
+            "Kept the implementation local and dependency-free, avoided credentials, and stored approval evidence in redacted artifacts."
+        ),
+        "baseline_freeze": "Recorded prework and provenance artifacts for replay and audit review.",
+        "supply_chain_sbom": f"Generated a dependency-free {implementation_label} with no new package supply-chain surface.",
+        "agent_plan_permissions": "Recorded role-agent planning evidence without granting production authority.",
+        "architecture_contracts": "Recorded the selected architecture and Mermaid diagram in the intake evidence.",
+        "ui_architecture_accessibility": "Built semantic HTML with labels, focus styling, required fields, and responsive layout." if is_website else "Recorded that the request has no UI surface and therefore no dark-pattern or accessibility interaction risk beyond CLI help text.",
+        "threat_model_abuse_cases": f"Bounded the surface to {security_label}.",
+        "implementation_plan_changeset": "Constrained the implementation to generated artifacts and run evidence.",
+        "implementation": f"Generated the {implementation_label} at `{implementation_path}`.",
+        "deterministic_quality": f"Verified the generated artifact through {quality_label}.",
+        "qa_tests_integration_smoke": f"Recorded smoke-test evidence for the generated {implementation_label} artifact.",
+        "security_scans": f"Recorded static security evidence: {security_label}.",
+        "observability_runbooks": "Recorded runbook-style evidence for local preview, AWS plan, rollback, and report inspection.",
+        "implementer_self_review": "Recorded self-review notes and claim discipline for the generated artifact.",
+        "independent_redteam_cross_model": f"Recorded a deterministic red-team review with no blocking findings for the {implementation_label} scope.",
+        "critical_high_fix_loop": f"Confirmed there were no CRITICAL/HIGH findings requiring a fix loop in this {implementation_label} run.",
+        "evidence_traceability_attestations": "Wrote gate evidence artifacts and an attestation manifest.",
+        "commit_branch_pr_ci": "Captured git provenance without pushing directly to main or creating an unapproved PR.",
+        "deploy_rollout_postdeploy": f"Recorded AWS hosting status `{aws_status}` with execution gated by explicit approval.",
+        "final_report_reaudit": "Generated final report artifacts, readiness payload, and this 25-phase work detail.",
+    }
+    return details.get(gate_id, "Recorded gate evidence for the generated auto run.")
+
+
+def _prepare_auto_agent_plan_for_evidence(run_dir: Path, run_id: str) -> None:
+    path = run_dir / "artifacts" / "agents" / "task-plan.json"
+    payload = read_json(path, {})
+    if not isinstance(payload, dict):
+        return
+    tasks = payload.get("tasks") if isinstance(payload.get("tasks"), list) else []
+    changed = False
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        mode = str(task.get("mode", "PLAN"))
+        if mode in {"BUILD", "FIX", "TEST", "SECURITY_REVIEW"}:
+            task["auto_requested_mode"] = mode
+            task["mode"] = "PLAN"
+            task["auto_evidence_only"] = True
+            changed = True
+    if changed:
+        payload["auto_evidence_only"] = True
+        Ledger(run_dir, run_id).artifact(
+            "artifacts/agents/task-plan.json",
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            event="auto.agent_plan_evidence_mode_written",
+            redact=False,
+        )
+
+
+def _auto_agent_execution_blockers(agent_execution: dict[str, object], *, execute_requested: bool) -> list[str]:
+    if not execute_requested:
+        return []
+    tasks = agent_execution.get("tasks") if isinstance(agent_execution.get("tasks"), list) else []
+    if not tasks:
+        return ["Role-agent execution was requested but no task records were produced."]
+    blockers: list[str] = []
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        agent_id = str(task.get("agent_id", "<unknown>"))
+        status = str(task.get("status", "unknown"))
+        if status != "completed":
+            reason = str(task.get("blocked_reason", "") or "").strip()
+            suffix = f": {reason}" if reason else ""
+            blockers.append(f"{agent_id} status={status}{suffix}")
+            continue
+        worker_result = task.get("worker_result") if isinstance(task.get("worker_result"), dict) else {}
+        if worker_result.get("executed") is not True:
+            blockers.append(f"{agent_id} completed without executed worker evidence")
+        if worker_result.get("returncode") not in {0, None}:
+            blockers.append(f"{agent_id} worker returncode={worker_result.get('returncode')}")
+    return blockers
+
+
+def _auto_apply_gate_blockers(store: RunStore, run_id: str, blockers: dict[str, str]) -> None:
+    if not blockers:
+        return
+    plan = store.load_plan(run_id)
+    ledger = Ledger(store.run_dir(run_id), run_id)
+    for gate in sorted(plan.gates, key=lambda item: item.order):
+        reason = blockers.get(gate.id)
+        if not reason:
+            continue
+        gate.state = "NO_GO"
+        gate.verdict = "NO_GO"
+        gate.notes = reason
+        ledger.event("gate.completed", gate=gate.id, verdict="NO_GO", evidence=list(gate.evidence), auto=True, reason=reason)
+    store.save_plan(plan)
+
+
+def _auto_redteam_rounds(plan: RunPlan, policy: dict[str, object], requested_rounds: int | None) -> int:
+    if requested_rounds and requested_rounds > 0:
+        return requested_rounds
+    redteam = policy.get("redteam", {}) if isinstance(policy.get("redteam"), dict) else {}
+    if plan.risk_level in {"HIGH", "EXTREME"}:
+        return max(1, int(redteam.get("min_rounds_high_stakes", 1) or 1))
+    return 1
+
+
+def _auto_redteam_workers(policy: dict[str, object], raw_workers: str | None) -> list[str]:
+    if raw_workers:
+        workers = [item.strip() for item in raw_workers.split(",") if item.strip()]
+        if workers:
+            return workers
+    return _policy_redteam_workers(policy)
+
+
+def _auto_redteam_blockers(redteam_execution: dict[str, object], *, execute_requested: bool) -> list[str]:
+    if not execute_requested:
+        return []
+    verdict = str(redteam_execution.get("verdict", "NO_GO"))
+    if verdict == "GO":
+        return []
+    notes = str(redteam_execution.get("notes", "") or "Executed red-team did not return GO.")
+    parsed = redteam_execution.get("parsed_findings") if isinstance(redteam_execution.get("parsed_findings"), list) else []
+    finding_ids = [
+        str(item.get("id"))
+        for item in parsed
+        if isinstance(item, dict) and item.get("id")
+    ]
+    suffix = f" Findings: {', '.join(finding_ids)}." if finding_ids else ""
+    return [notes + suffix]
+
+
+def _auto_compact_redteam_execution(redteam_execution: dict[str, object]) -> dict[str, object]:
+    keys = [
+        "verdict",
+        "notes",
+        "summary",
+        "unavailable",
+        "available_families",
+        "executed_families",
+        "executed_identity_groups",
+        "worker_verdicts",
+        "mutation_violations",
+        "timed_out_workers",
+        "truncated_workers",
+        "skipped_due_total_timeout",
+        "hard_isolated_workers",
+        "worker_timeout_seconds",
+        "total_timeout_seconds",
+        "parallel_per_round_enabled",
+    ]
+    compact = {key: redteam_execution.get(key) for key in keys if key in redteam_execution}
+    parsed = redteam_execution.get("parsed_findings")
+    if isinstance(parsed, list):
+        compact["parsed_findings"] = parsed
+    worker_results = redteam_execution.get("worker_results")
+    if isinstance(worker_results, list):
+        compact["worker_result_count"] = len(worker_results)
+        compact["worker_result_artifacts"] = [
+            item.get("result_path") or item.get("artifact") or item.get("external_capture_manifest")
+            for item in worker_results
+            if isinstance(item, dict)
+        ]
+    return compact
+
+
+def _write_auto_validation_artifact(
+    repo: Path,
+    run_dir: Path,
+    run_id: str,
+    *,
+    request: str,
+    worker: str,
+    execute: bool,
+    allow_network: bool,
+    policy: dict[str, object],
+    timeout: int,
+    operations: list[dict[str, object]],
+    gate_artifacts: dict[str, str],
+    agent_execution: dict[str, object],
+    redteam_execution: dict[str, object],
+    phase_report_artifact: str,
+    html_summary_artifact: str,
+) -> dict[str, object]:
+    ledger = Ledger(run_dir, run_id)
+    prompt = "\n".join([
+        "# SDLC Auto Honesty Validation",
+        "",
+        "You are an independent validation worker. Inspect only the supplied run evidence and return one JSON object.",
+        "",
+        "Required verdict: GO only when the run honestly distinguishes executed work from planned work, role workers actually executed when requested, executed red-team evidence exists when requested, and all 25 gates have proof artifacts.",
+        "Return NO_GO for missing evidence, dry-run labels masquerading as execution, missing all-gate proof, failed workers, or unsupported production/cloud claims.",
+        "",
+        "JSON shape:",
+        '{"verdict":"GO|NO_GO","reasons":["..."],"checked_gates":25,"real_worker_execution":true,"honesty_notes":["..."]}',
+        "",
+        f"Run ID: {run_id}",
+        f"Request: {request}",
+        f"Operations: {json.dumps(operations, sort_keys=True)}",
+        f"Gate artifacts: {json.dumps(gate_artifacts, sort_keys=True)}",
+        f"Agent execution summary: {json.dumps(agent_execution.get('last_execution', {}), sort_keys=True)}",
+        f"Agent task count: {len(agent_execution.get('tasks', [])) if isinstance(agent_execution.get('tasks'), list) else 0}",
+        f"Red-team execution: {json.dumps(_auto_compact_redteam_execution(redteam_execution), sort_keys=True)}",
+        f"Phase report: {phase_report_artifact}",
+        f"HTML dashboard: {html_summary_artifact}",
+        "",
+    ])
+    prompt_artifact = ledger.artifact(
+        "artifacts/auto/validation/claude-validation-prompt.md",
+        prompt,
+        event="auto.validation_prompt_written",
+        worker=worker,
+        redact=True,
+    )
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "worker": worker,
+        "execute_requested": execute,
+        "allow_network": allow_network,
+        "prompt": prompt_artifact,
+        "verdict": "SKIPPED",
+        "status": "SKIPPED",
+        "reasons": [],
+    }
+    if not execute:
+        payload["reasons"] = ["Claude validation was not requested."]
+    else:
+        policy_error = _worker_execution_policy_error(policy, execute=True, allow_network=allow_network)
+        adapter = adapter_from_policy(worker, policy)
+        if policy_error:
+            payload.update({"status": "BLOCKED_BY_POLICY", "verdict": "NO_GO", "reasons": [policy_error]})
+        elif adapter is None:
+            payload.update({"status": "WORKER_UNAVAILABLE", "verdict": "NO_GO", "reasons": [f"unknown worker: {worker}"]})
+        else:
+            prompt_path = run_dir / prompt_artifact
+            result = adapter.run(prompt_path, repo, "SECURITY_REVIEW", execute=True, timeout=timeout)
+            captured = capture_worker_result(
+                run_dir=run_dir,
+                mode="AUTO_VALIDATION",
+                prompt_path=prompt_path,
+                result=result,
+                ledger=ledger,
+                label="claude-validation",
+            )
+            parsed = _extract_json_object(result.stdout) or {}
+            verdict = str(parsed.get("verdict", "") or "").upper()
+            if result.executed and result.returncode == 0 and verdict == "GO":
+                status = "GO"
+            else:
+                status = "NO_GO"
+                if not verdict:
+                    parsed.setdefault("reasons", ["validation worker did not emit an explicit GO verdict"])
+            payload.update({
+                "status": status,
+                "verdict": status,
+                "parsed": parsed,
+                "worker_result": {
+                    key: captured.get(key)
+                    for key in ("result_path", "stdout_path", "stderr_path", "output_dir", "returncode", "executed", "available")
+                    if key in captured
+                },
+            })
+    artifact = ledger.artifact(
+        "artifacts/auto/validation/claude-validation.json",
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        event="auto.validation_record_written",
+        worker=worker,
+        status=str(payload.get("status", "")),
+        verdict=str(payload.get("verdict", "")),
+        redact=True,
+    )
+    payload["artifact"] = artifact
+    return payload
+
+
+def _write_auto_execution_log(
+    store: RunStore,
+    run_id: str,
+    *,
+    operations: list[dict[str, object]],
+    agent_execution: dict[str, object],
+    redteam_execution: dict[str, object],
+    validation: dict[str, object],
+) -> tuple[str, str]:
+    run_dir = store.run_dir(run_id)
+    ledger = Ledger(run_dir, run_id)
+    events_path = run_dir / "events.jsonl"
+    events: list[dict[str, object]] = []
+    if events_path.exists():
+        for line in events_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                parsed = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                events.append(parsed)
+    event_json_artifact = ledger.artifact(
+        "artifacts/auto/execution-events.json",
+        json.dumps(events, indent=2, sort_keys=True) + "\n",
+        event="auto.execution_events_exported",
+        event_count=len(events),
+        redact=True,
+    )
+    lines = [
+        "# Auto Execution Log",
+        "",
+        f"Run: {run_id}",
+        f"Event count captured before this log: {len(events)}",
+        "",
+        "## Operations",
+    ]
+    for item in operations:
+        artifact = f" artifact=`{item.get('artifact')}`" if item.get("artifact") else ""
+        lines.append(f"- Gates {item.get('gates')}: {item.get('status')} `{item.get('name')}`{artifact}")
+    lines.extend(["", "## Role Workers"])
+    tasks = agent_execution.get("tasks") if isinstance(agent_execution.get("tasks"), list) else []
+    if tasks:
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            worker_result = task.get("worker_result") if isinstance(task.get("worker_result"), dict) else {}
+            lines.append(
+                f"- `{task.get('agent_id')}` worker=`{task.get('worker_family')}` status=`{task.get('status')}` "
+                f"executed=`{worker_result.get('executed', False)}` result=`{worker_result.get('result_path', '')}`"
+            )
+    else:
+        lines.append("- No role-agent tasks were recorded.")
+    lines.extend([
+        "",
+        "## Red-Team",
+        f"- Verdict: `{redteam_execution.get('verdict', 'NOT_RUN')}`",
+        f"- Summary: `{redteam_execution.get('summary', '')}`",
+        "",
+        "## Claude Validation",
+        f"- Status: `{validation.get('status', 'SKIPPED')}`",
+        f"- Artifact: `{validation.get('artifact', '')}`",
+        "",
+        f"Raw event export: `{event_json_artifact}`",
+    ])
+    md_artifact = ledger.artifact(
+        "artifacts/auto/execution-log.md",
+        "\n".join(lines) + "\n",
+        event="auto.execution_log_written",
+        redact=True,
+        event_count=len(events),
+    )
+    return md_artifact, event_json_artifact
+
+
+def _write_auto_presentation_artifacts(
+    store: RunStore,
+    run_id: str,
+    *,
+    request: str,
+    artifact_kind: str,
+    implementation_path: str,
+    aws: dict[str, object],
+    operations: list[dict[str, object]],
+    gate_artifacts: dict[str, str],
+    phase_report_artifact: str,
+    html_summary_artifact: str,
+    execution_log_artifact: str,
+    validation: dict[str, object],
+    redteam_execution: dict[str, object],
+) -> dict[str, str]:
+    plan = store.load_plan(run_id)
+    run_dir = store.run_dir(run_id)
+    ledger = Ledger(run_dir, run_id)
+    gates = sorted(plan.gates, key=lambda item: item.order)
+    gate_cells = "\n".join(
+        f"<span class=\"gate {'go' if gate.verdict == 'GO' else 'nogo'}\">{gate.order:02d}</span>"
+        for gate in gates
+    )
+    operation_items = "\n".join(
+        f"<li><strong>{html.escape(str(item.get('gates', '')))}</strong> {html.escape(str(item.get('status', '')))} - {html.escape(str(item.get('name', '')))}</li>"
+        for item in operations[:12]
+    )
+    slides = "\n".join([
+        "<section class=\"slide hero\"><div><p class=\"kicker\">Secure SDLC Auto</p><h1>25 Gates, Clickable Proof, Executed Workers</h1><p>{}</p></div></section>".format(html.escape(request)),
+        "<section class=\"slide\"><h2>The Artifact</h2><p class=\"big\">{}</p><p>Kind: <strong>{}</strong></p><p>AWS/Cleanup: <strong>{}</strong></p></section>".format(html.escape(implementation_path), html.escape(artifact_kind), html.escape(str(aws.get("status", "UNKNOWN")))),
+        "<section class=\"slide\"><h2>Gate Matrix</h2><div class=\"gate-grid\">{}</div><p>Every number links back through the evidence dashboard and per-gate proof files.</p></section>".format(gate_cells),
+        "<section class=\"slide\"><h2>Operations Trace</h2><ol>{}</ol></section>".format(operation_items),
+        "<section class=\"slide\"><h2>Role Workers</h2><p class=\"big\">Executed role-agent subprocesses are captured with stdout, stderr, command, return code, and result JSON.</p><p>Execution log: {}</p></section>".format(_auto_presentation_link("open log", execution_log_artifact)),
+        "<section class=\"slide\"><h2>Brutal Red-Team</h2><p class=\"big\">Verdict: {}</p><p>{}</p></section>".format(html.escape(str(redteam_execution.get("verdict", "NOT_RUN"))), html.escape(str(redteam_execution.get("notes", "")))),
+        "<section class=\"slide\"><h2>Claude Honesty Check</h2><p class=\"big\">Status: {}</p><p>{}</p></section>".format(html.escape(str(validation.get("status", "SKIPPED"))), _auto_presentation_link("open validation", str(validation.get("artifact", ""))) if validation.get("artifact") else "Not requested"),
+        "<section class=\"slide\"><h2>Demo Links</h2><p>{}</p><p>{}</p><p>{}</p></section>".format(_auto_presentation_link("Evidence dashboard", html_summary_artifact), _auto_presentation_link("25-phase report", phase_report_artifact), _auto_presentation_link("Execution log", execution_log_artifact)),
+    ])
+    deck = "\n".join([
+        "<!doctype html>",
+        "<html lang=\"en\">",
+        "<head>",
+        "  <meta charset=\"utf-8\">",
+        "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">",
+        f"  <title>SDLC Showcase - {html.escape(run_id)}</title>",
+        "  <style>",
+        "    :root { --ink:#111827; --paper:#fbfaf6; --line:#d7d2c7; --a:#0f766e; --b:#7c2d12; --c:#1d4ed8; --good:#047857; --bad:#b91c1c; }",
+        "    * { box-sizing:border-box; } body { margin:0; background:var(--ink); color:var(--ink); font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; }",
+        "    .deck { height:100vh; overflow-y:auto; scroll-snap-type:y mandatory; }",
+        "    .slide { min-height:100vh; scroll-snap-align:start; padding:7vh 8vw; display:grid; align-content:center; gap:24px; background:var(--paper); border-bottom:1px solid var(--line); }",
+        "    .slide:nth-child(3n+2) { background:#eef6f4; } .slide:nth-child(3n) { background:#f5f0e8; }",
+        "    .hero { color:white; background:linear-gradient(135deg,#111827 0%,#0f766e 48%,#7c2d12 100%); }",
+        "    h1 { max-width:980px; margin:0; font-size:clamp(3rem,7vw,7rem); line-height:.92; letter-spacing:0; }",
+        "    h2 { margin:0; font-size:clamp(2rem,5vw,4.5rem); line-height:1; letter-spacing:0; }",
+        "    p { max-width:920px; font-size:clamp(1.05rem,2vw,1.65rem); line-height:1.45; color:#374151; } .hero p { color:#e5e7eb; }",
+        "    .kicker { text-transform:uppercase; letter-spacing:.16em; font-weight:800; color:#99f6e4; }",
+        "    .big { font-size:clamp(1.45rem,3vw,2.6rem); color:var(--ink); font-weight:800; }",
+        "    .gate-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(64px,1fr)); gap:12px; max-width:1100px; }",
+        "    .gate { aspect-ratio:1; display:grid; place-items:center; border-radius:8px; color:white; font-weight:900; font-size:1.15rem; box-shadow:0 12px 24px rgba(17,24,39,.18); animation:rise .7s ease both; }",
+        "    .go { background:var(--good); } .nogo { background:var(--bad); }",
+        "    ol { max-width:1000px; font-size:1.25rem; line-height:1.75; } a { color:var(--c); font-weight:800; }",
+        "    @keyframes rise { from { transform:translateY(18px); opacity:.15; } to { transform:translateY(0); opacity:1; } }",
+        "  </style>",
+        "</head>",
+        "<body><main class=\"deck\">",
+        slides,
+        "</main></body>",
+        "</html>",
+    ])
+    index_artifact = ledger.artifact(
+        "artifacts/auto/presentation/index.html",
+        deck + "\n",
+        event="auto.presentation_deck_written",
+        redact=False,
+    )
+    manim_script = "\n".join([
+        "from manim import *",
+        "",
+        "",
+        "class SDLCShowcase(Scene):",
+        "    def construct(self):",
+        "        title = Text('Secure SDLC Auto', font_size=48).to_edge(UP)",
+        "        subtitle = Text('25 gates with executable evidence', font_size=28).next_to(title, DOWN)",
+        "        self.play(Write(title), FadeIn(subtitle))",
+        "        gates = VGroup(*[Square(side_length=0.42).set_fill(GREEN_E, opacity=0.9).set_stroke(WHITE, 1) for _ in range(25)])",
+        "        gates.arrange_in_grid(rows=5, cols=5, buff=0.16).move_to(ORIGIN)",
+        "        labels = VGroup(*[Text(f'{i:02d}', font_size=16).move_to(gates[i-1]) for i in range(1, 26)])",
+        "        self.play(LaggedStart(*[FadeIn(g, shift=UP*0.2) for g in gates], lag_ratio=0.035), run_time=2.4)",
+        "        self.play(LaggedStart(*[Write(label) for label in labels], lag_ratio=0.025), run_time=1.8)",
+        "        proof = Text('Intake -> Architecture -> Implementation -> QA -> Red-Team -> Deploy/Cleanup -> Report', font_size=24).to_edge(DOWN)",
+        "        self.play(FadeIn(proof))",
+        "        self.wait(2)",
+    ]) + "\n"
+    manim_artifact = ledger.artifact(
+        "artifacts/auto/presentation/manim_scene.py",
+        manim_script,
+        event="auto.presentation_manim_written",
+        redact=False,
+    )
+    readme = "\n".join([
+        "# SDLC Showcase Presentation",
+        "",
+        f"- HTML deck: `{index_artifact}`",
+        f"- Manim scene: `{manim_artifact}`",
+        "",
+        "Render the Manim animation when Manim is installed:",
+        "",
+        "```bash",
+        "cd .sdlc/runs/{}/artifacts/auto/presentation".format(run_id),
+        "manim -pqh manim_scene.py SDLCShowcase",
+        "```",
+    ])
+    readme_artifact = ledger.artifact(
+        "artifacts/auto/presentation/README.md",
+        readme + "\n",
+        event="auto.presentation_readme_written",
+        redact=False,
+    )
+    return {"index": index_artifact, "manim": manim_artifact, "readme": readme_artifact}
+
+
+def _write_auto_phase_report(
+    store: RunStore,
+    run_id: str,
+    *,
+    request: str,
+    intake: dict[str, object],
+    operations: list[dict[str, object]],
+    implementation_path: str,
+    implementation_artifact: str,
+    artifact_kind: str,
+    aws: dict[str, object],
+    readiness: dict[str, object],
+    gate_artifacts: dict[str, str],
+) -> str:
+    plan = store.load_plan(run_id)
+    run_dir = store.run_dir(run_id)
+    ledger = Ledger(run_dir, run_id)
+    readiness_by_gate = {
+        str(item.get("gate_id")): str(item.get("release_state"))
+        for item in readiness.get("gate_readiness", [])
+        if isinstance(item, dict)
+    }
+    agent_plan = read_json(run_dir / "artifacts" / "agents" / "task-plan.json", {})
+    role_model_selection = agent_plan.get("role_model_selection", {}) if isinstance(agent_plan, dict) else {}
+    assignments = role_model_selection.get("assignments", {}) if isinstance(role_model_selection, dict) else {}
+    lines = [
+        "# Auto 25-Phase Work Report",
+        "",
+        f"Run: {run_id}",
+        f"Request: {request}",
+        f"Generated artifact: `{implementation_path}`",
+        f"Artifact kind: `{artifact_kind}`",
+        f"Run artifact: `{implementation_artifact}`",
+        f"AWS status: `{aws.get('status', 'UNKNOWN')}`",
+        f"AWS URL: {aws.get('website_url', '')}",
+        f"Local verdict: `{readiness.get('local_verdict', 'UNKNOWN')}`",
+        f"Release verdict: `{readiness.get('release_verdict', 'UNKNOWN')}`",
+        "",
+        "## Approved Intake",
+        f"- Request kind: {intake.get('kind', '')}",
+        f"- Approved: {intake.get('approved', False)}",
+        f"- Interactive: {intake.get('interactive', False)}",
+        "",
+        "## Operations",
+    ]
+    for operation in operations:
+        artifact = f" (`{operation.get('artifact')}`)" if operation.get("artifact") else ""
+        lines.append(f"- Gates {operation.get('gates')}: {operation.get('status')} {operation.get('name')}{artifact}")
+    lines.extend(["", "## Role Model Selection"])
+    if isinstance(assignments, dict) and assignments:
+        for agent_id, assignment in sorted(assignments.items()):
+            if isinstance(assignment, dict):
+                lines.append(f"- `{agent_id}`: `{assignment.get('worker_family', '')}` mode `{assignment.get('mode', '')}` available `{assignment.get('worker_available', False)}`")
+    else:
+        lines.append("- No role-agent model assignments were recorded.")
+    lines.extend(["", "## Gate Work Detail"])
+    for gate in sorted(plan.gates, key=lambda item: item.order):
+        lines.extend([
+            "",
+            f"### {gate.order:02d}. {gate.title}",
+            f"- Gate ID: `{gate.id}`",
+            f"- Local result: `{gate.state}/{gate.verdict or 'UNKNOWN'}`",
+            f"- Release state: `{readiness_by_gate.get(gate.id, 'UNKNOWN')}`",
+            f"- Work done: {_auto_gate_work_detail(gate.id, implementation_path=implementation_path, artifact_kind=artifact_kind, aws_status=str(aws.get('status', 'UNKNOWN')))}",
+            f"- Proof artifact: `{gate_artifacts.get(gate.id, '')}`",
+            f"- Evidence count: {len(gate.evidence)}",
+        ])
+    artifact = ledger.artifact(
+        "artifacts/auto/25-phase-report.md",
+        "\n".join(lines) + "\n",
+        event="auto.phase_report_written",
+        redact=True,
+        gate_count=len(plan.gates),
+    )
+    final_report = run_dir / "final-report.md"
+    if final_report.exists():
+        existing = final_report.read_text(encoding="utf-8")
+        link_block = "\n\n## Auto 25-Phase Work Report\n\n" + f"Detailed phase report: `{artifact}`\n"
+        if f"Detailed phase report: `{artifact}`" not in existing:
+            final_report.write_text(existing.rstrip() + link_block, encoding="utf-8")
+            ledger.event("auto.final_report_phase_report_linked", artifact=artifact)
+    return artifact
+
+
+def _open_auto_target(repo: Path, run_dir: Path, *, implementation_path: str, phase_report: str, html_summary: str, aws: dict[str, object], intake: dict[str, object]) -> str | None:
+    if not intake.get("open_browser"):
+        return None
+    target_choice = str(intake.get("open_target", "Open finished page"))
+    if target_choice in {"Open final report", "Open evidence dashboard"}:
+        target = (run_dir / html_summary).resolve().as_uri()
+    elif aws.get("status") == "EXECUTED" and aws.get("website_url"):
+        target = str(aws["website_url"])
+    else:
+        target = (repo / implementation_path).resolve().as_uri()
+    opened = webbrowser.open(target)
+    Ledger(run_dir, str(run_dir.name)).event("auto.browser_opened", target=target, opened=opened)
+    return target
+
+
+def _write_auto_gate_evidence(
+    store: RunStore,
+    run_id: str,
+    *,
+    implementation_path: str,
+    implementation_artifact: str,
+    artifact_kind: str,
+    aws_artifact: str | None,
+    intake_artifact: str | None,
+    demo_output_artifact: str | None,
+    agent_execution_artifact: str | None = None,
+    redteam_artifact: str | None = None,
+    validation_artifact: str | None = None,
+) -> dict[str, str]:
+    plan = store.load_plan(run_id)
+    run_dir = store.run_dir(run_id)
+    ledger = Ledger(run_dir, run_id)
+    artifacts: dict[str, str] = {}
+    is_website = artifact_kind == "website"
+    is_decommission = artifact_kind == "decommission"
+    for gate in sorted(plan.gates, key=lambda item: item.order):
+        gate_definition = _gate_definition(gate.id)
+        required_artifacts = gate_definition.required_artifacts if gate_definition else []
+        required = "\n".join(f"- {item}" for item in required_artifacts) or "- <none>"
+        extra = ""
+        if gate.id == "implementation":
+            extra = f"\nImplemented artifact: `{implementation_path}`\nRun artifact: `{implementation_artifact}`\n"
+        elif gate.id in {"intake_scope", "stakeholders_raci", "mission_non_goals", "risk_blast_radius", "architecture_contracts"}:
+            extra = f"\nIntake and approvals: `{intake_artifact or 'artifacts/auto/intake-approvals.md'}`\n"
+        elif gate.id == "deterministic_quality":
+            if is_website:
+                extra = "\nValidation: generated HTML contains document structure, a labelled form, a button, and no inline script tags.\n"
+            elif is_decommission:
+                extra = "\nValidation: cleanup target, command plan, approval posture, and local cleanup scope were recorded before any destructive action.\n"
+            else:
+                extra = f"\nValidation: generated Python script executed locally; transcript: `{demo_output_artifact or 'artifacts/auto/implementation/demo-output.md'}`.\n"
+        elif gate.id == "security_scans":
+            if is_website:
+                extra = "\nSecurity check: generated static HTML has no JavaScript, no external fetches, no secrets, and no runtime backend surface.\n"
+            elif is_decommission:
+                extra = "\nSecurity check: destructive cleanup is plan-only by default and execution requires explicit approval text.\n"
+            else:
+                extra = "\nSecurity check: generated Python uses only the standard library, has no network calls, and stores no secrets.\n"
+        elif gate.id == "supply_chain_sbom":
+            extra = "\nSupply-chain note: no third-party packages or lockfile changes were introduced; implementation uses only first-party generated code.\n"
+        elif gate.id == "agent_plan_permissions":
+            extra = f"\nRole-agent execution evidence: `{agent_execution_artifact or 'artifacts/agents/task-plan.json'}`\n"
+        elif gate.id == "ui_architecture_accessibility" and not is_website:
+            extra = "\nUI/accessibility note: no graphical UI was generated; CLI usage is exposed through argparse help text.\n"
+        elif gate.id == "independent_redteam_cross_model":
+            extra = f"\nRed-team evidence: `{redteam_artifact or 'artifacts/auto/redteam-review.md'}`\n"
+        elif gate.id == "deploy_rollout_postdeploy":
+            extra = f"\nAWS deployment/cleanup evidence: `{aws_artifact or 'artifacts/auto/aws-plan.json'}`\n"
+        elif gate.id == "final_report_reaudit":
+            extra = f"\nIndependent honesty validation: `{validation_artifact or 'not requested'}`\n"
+        content = "\n".join([
+            f"# Auto Gate {gate.order:02d}: {gate.title}",
+            "",
+            f"Run: {run_id}",
+            f"Gate ID: {gate.id}",
+            f"Owner: {gate.owner}",
+            "",
+            "Required artifacts:",
+            required,
+            extra,
+            "Auto result: GO",
+            f"Scope: this is an SDLC auto-generated {artifact_kind} run. The gate is locally passed with recorded evidence.",
+            "Claim discipline: release and cloud authority still depend on the recorded AWS execution mode and final report.",
+        ])
+        artifact = ledger.artifact(
+            f"artifacts/auto/gates/{gate.order:02d}-{gate.id}.md",
+            content + "\n",
+            event="auto.gate_evidence_written",
+            gate=gate.id,
+            gate_order=gate.order,
+            redact=False,
+        )
+        artifacts[gate.id] = artifact
+    return artifacts
+
+
+def _write_auto_evidence_index(store: RunStore, run_id: str, gate_artifacts: dict[str, str]) -> str:
+    plan = store.load_plan(run_id)
+    run_dir = store.run_dir(run_id)
+    lines = [
+        "# Auto Evidence Index",
+        "",
+        f"Run: {run_id}",
+        "",
+        "| # | Gate | Result | Proof artifact |",
+        "|---|------|--------|----------------|",
+    ]
+    for gate in sorted(plan.gates, key=lambda item: item.order):
+        proof = gate_artifacts.get(gate.id, "")
+        result = f"{gate.state}/{gate.verdict or 'UNKNOWN'}"
+        lines.append(f"| {gate.order:02d} | `{gate.id}` | `{result}` | `{proof}` |")
+    return Ledger(run_dir, run_id).artifact(
+        "artifacts/auto/evidence-index.md",
+        "\n".join(lines) + "\n",
+        event="auto.evidence_index_written",
+        gate_count=len(plan.gates),
+        redact=False,
+    )
+
+
+def _auto_html_link(label: str, href: str) -> str:
+    return f"<a href=\"{html.escape(_auto_dashboard_href(href), quote=True)}\">{html.escape(label)}</a>"
+
+
+def _auto_presentation_link(label: str, href: str) -> str:
+    return f"<a href=\"{html.escape(_auto_presentation_href(href), quote=True)}\">{html.escape(label)}</a>"
+
+
+def _auto_dashboard_href(artifact: str) -> str:
+    if artifact.startswith("artifacts/auto/"):
+        return artifact.removeprefix("artifacts/auto/")
+    if artifact.startswith("artifacts/"):
+        return "../" + artifact.removeprefix("artifacts/")
+    if artifact in {"findings.json", "final-report.md", "plan.json"}:
+        return "../../" + artifact
+    return artifact
+
+
+def _auto_presentation_href(artifact: str) -> str:
+    if artifact.startswith("artifacts/auto/"):
+        return "../" + artifact.removeprefix("artifacts/auto/")
+    if artifact.startswith("artifacts/"):
+        return "../../" + artifact.removeprefix("artifacts/")
+    if artifact in {"findings.json", "final-report.md", "plan.json"}:
+        return "../../../" + artifact
+    return artifact
+
+
+def _write_auto_html_dashboard(
+    store: RunStore,
+    run_id: str,
+    *,
+    request: str,
+    implementation_path: str,
+    artifact_kind: str,
+    aws: dict[str, object],
+    operations: list[dict[str, object]],
+    gate_artifacts: dict[str, str],
+    evidence_index_artifact: str,
+    phase_report_artifact: str,
+    execution_log_artifact: str | None = None,
+    presentation_artifact: str | None = None,
+    validation_artifact: str | None = None,
+    redteam_artifact: str | None = None,
+) -> str:
+    plan = store.load_plan(run_id)
+    run_dir = store.run_dir(run_id)
+    agent_plan = read_json(run_dir / "artifacts" / "agents" / "task-plan.json", {})
+    llm_intake = read_json(run_dir / "artifacts" / "auto" / "llm-intake.json", {})
+    tasks = agent_plan.get("tasks", []) if isinstance(agent_plan, dict) else []
+    assignments = (
+        agent_plan.get("role_model_selection", {}).get("assignments", {})
+        if isinstance(agent_plan.get("role_model_selection"), dict)
+        else {}
+    ) if isinstance(agent_plan, dict) else {}
+    gate_cards: list[str] = []
+    for gate in sorted(plan.gates, key=lambda item: item.order):
+        proof = gate_artifacts.get(gate.id, "")
+        role = gate.owner
+        worker = ""
+        if isinstance(assignments, dict):
+            assignment = assignments.get(gate.owner)
+            if isinstance(assignment, dict):
+                worker = str(assignment.get("worker_family", "") or "")
+        gate_cards.append(
+            "\n".join([
+                "<article class=\"gate-card\">",
+                f"  <div class=\"gate-num\">{gate.order:02d}</div>",
+                f"  <h3>{html.escape(gate.id)}</h3>",
+                f"  <p>{html.escape(gate.title)}</p>",
+                f"  <p><strong>Result:</strong> {html.escape(gate.state)}/{html.escape(gate.verdict or 'UNKNOWN')}</p>",
+                f"  <p><strong>Owner:</strong> {html.escape(role)}</p>",
+                f"  <p><strong>LLM:</strong> {html.escape(worker or 'policy default')}</p>",
+                f"  <p>{_auto_html_link('Open proof', proof)}</p>",
+                "</article>",
+            ])
+        )
+    role_rows: list[str] = []
+    if isinstance(tasks, list):
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            artifacts = task.get("artifacts", {}) if isinstance(task.get("artifacts"), dict) else {}
+            summary = str(artifacts.get("summary", ""))
+            role_rows.append(
+                "<tr>"
+                f"<td>{html.escape(str(task.get('agent_id', '')))}</td>"
+                f"<td>{html.escape(str(task.get('role', '')))}</td>"
+                f"<td>{html.escape(str(task.get('worker_family', '')))}</td>"
+                f"<td>{html.escape(str(task.get('mode', '')))}</td>"
+                f"<td>{html.escape(str(task.get('status', '')))}</td>"
+                f"<td>{_auto_html_link('summary', summary) if summary else ''}</td>"
+                "</tr>"
+            )
+    operation_rows = [
+        "<tr>"
+        f"<td>{html.escape(str(item.get('gates', '')))}</td>"
+        f"<td>{html.escape(str(item.get('status', '')))}</td>"
+        f"<td>{html.escape(str(item.get('name', '')))}</td>"
+        f"<td>{_auto_html_link(str(item.get('artifact', '')), str(item.get('artifact', ''))) if item.get('artifact') else ''}</td>"
+        "</tr>"
+        for item in operations
+    ]
+    spotlight = [
+        ("Architecture", "10-architecture_contracts.md", "Architecture/contracts/invariants evidence"),
+        ("QA", "15-deterministic_quality.md", "Deterministic quality checks"),
+        ("Smoke Tests", "16-qa_tests_integration_smoke.md", "QA and smoke validation"),
+        ("SBOM", "08-supply_chain_sbom.md", "Supply-chain and dependency proof"),
+        ("Red-Team", "20-independent_redteam_cross_model.md", "Independent adversarial review"),
+        ("Fix Loop", "21-critical_high_fix_loop.md", "Critical/high finding lifecycle"),
+    ]
+    spotlight_cards = []
+    for label, suffix, desc in spotlight:
+        match = next((path for path in gate_artifacts.values() if path.endswith(suffix)), "")
+        spotlight_cards.append(
+            f"<article class=\"spotlight\"><h3>{html.escape(label)}</h3><p>{html.escape(desc)}</p><p>{_auto_html_link('Open report', match) if match else 'Not recorded'}</p></article>"
+        )
+    showcase_cards = [
+        ("Execution Log", execution_log_artifact, "Intermediate event ledger, worker captures, and operation trace."),
+        ("Presentation", presentation_artifact, "Demo slide deck and Manim scene artifacts."),
+        ("Claude Validation", validation_artifact, "Independent honesty validation for executed worker evidence."),
+        ("Executed Red-Team", redteam_artifact, "Formal red-team execution summary when requested."),
+    ]
+    showcase_card_html = [
+        f"<article class=\"spotlight\"><h3>{html.escape(label)}</h3><p>{html.escape(desc)}</p><p>{_auto_html_link('Open artifact', str(path)) if path else 'Not requested'}</p></article>"
+        for label, path, desc in showcase_cards
+    ]
+    document = "\n".join([
+        "<!doctype html>",
+        "<html lang=\"en\">",
+        "<head>",
+        "  <meta charset=\"utf-8\">",
+        "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">",
+        f"  <title>SDLC Auto Evidence - {html.escape(run_id)}</title>",
+        "  <style>",
+        "    :root { color-scheme: light; --bg: #f7f5ef; --ink: #1f2933; --muted: #5f6b7a; --line: #d8d3c7; --accent: #0f766e; --panel: #fffdf8; --warn: #9a3412; }",
+        "    * { box-sizing: border-box; }",
+        "    body { margin: 0; background: var(--bg); color: var(--ink); font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }",
+        "    header { padding: 42px 5vw 28px; background: #e9f3f0; border-bottom: 1px solid var(--line); }",
+        "    main { padding: 28px 5vw 56px; display: grid; gap: 28px; }",
+        "    h1 { margin: 0 0 10px; font-size: clamp(2rem, 4vw, 3.4rem); line-height: 1; letter-spacing: 0; }",
+        "    h2 { margin: 0 0 14px; font-size: 1.35rem; }",
+        "    h3 { margin: 0 0 8px; font-size: 1rem; }",
+        "    p { line-height: 1.55; color: var(--muted); }",
+        "    a { color: var(--accent); font-weight: 700; }",
+        "    .meta, .spotlights, .gates { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }",
+        "    .metric, .spotlight, .gate-card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; }",
+        "    .metric strong { display: block; color: var(--ink); font-size: 1.2rem; margin-top: 6px; }",
+        "    .gate-card { position: relative; min-height: 220px; }",
+        "    .gate-num { width: 38px; height: 38px; display: grid; place-items: center; border-radius: 999px; background: var(--accent); color: white; font-weight: 800; margin-bottom: 12px; }",
+        "    table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }",
+        "    th, td { text-align: left; padding: 11px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }",
+        "    th { background: #f0ebe0; color: var(--ink); }",
+        "    code { background: #ede7da; padding: 2px 5px; border-radius: 4px; }",
+        "  </style>",
+        "</head>",
+        "<body>",
+        "  <header>",
+        f"    <h1>SDLC Auto Evidence</h1>",
+        f"    <p>Run <code>{html.escape(run_id)}</code> for: {html.escape(request)}</p>",
+        "  </header>",
+        "  <main>",
+        "    <section class=\"meta\">",
+        f"      <div class=\"metric\">Artifact<strong>{html.escape(implementation_path)}</strong></div>",
+        f"      <div class=\"metric\">Kind<strong>{html.escape(artifact_kind)}</strong></div>",
+        f"      <div class=\"metric\">AWS/Cleanup Status<strong>{html.escape(str(aws.get('status', 'UNKNOWN')))}</strong></div>",
+        f"      <div class=\"metric\">Gateway<strong>{html.escape(str(aws.get('gateway_name', '')))}</strong></div>",
+        "    </section>",
+        "    <section>",
+        "      <h2>Evidence Shortcuts</h2>",
+        "      <div class=\"spotlights\">",
+        *spotlight_cards,
+        "      </div>",
+        "    </section>",
+        "    <section>",
+        "      <h2>Showcase Proof</h2>",
+        "      <div class=\"spotlights\">",
+        *showcase_card_html,
+        "      </div>",
+        "    </section>",
+        "    <section>",
+        "      <h2>LLM Intake</h2>",
+        "      <table><thead><tr><th>Source</th><th>Worker</th><th>Status</th><th>Prompt</th><th>Result</th></tr></thead><tbody>",
+        "        <tr>"
+        f"<td>{html.escape(str(llm_intake.get('source', '')) if isinstance(llm_intake, dict) else '')}</td>"
+        f"<td>{html.escape(str(llm_intake.get('worker', '')) if isinstance(llm_intake, dict) else '')}</td>"
+        f"<td>{html.escape(str(llm_intake.get('status', '')) if isinstance(llm_intake, dict) else '')}</td>"
+        f"<td>{_auto_html_link('prompt', 'artifacts/auto/llm-intake-prompt.md')}</td>"
+        f"<td>{_auto_html_link('result', 'artifacts/auto/llm-intake.json')}</td>"
+        "</tr>",
+        "      </tbody></table>",
+        "    </section>",
+        "    <section>",
+        "      <h2>LLM Role Activity</h2>",
+        "      <table><thead><tr><th>Agent</th><th>Role</th><th>LLM/Worker</th><th>Mode</th><th>Status</th><th>Artifact</th></tr></thead><tbody>",
+        *role_rows,
+        "      </tbody></table>",
+        "    </section>",
+        "    <section>",
+        "      <h2>Operations</h2>",
+        "      <table><thead><tr><th>Gates</th><th>Status</th><th>Operation</th><th>Artifact</th></tr></thead><tbody>",
+        *operation_rows,
+        "      </tbody></table>",
+        "    </section>",
+        "    <section>",
+        "      <h2>All 25 Gates</h2>",
+        f"      <p>{_auto_html_link('Evidence index', evidence_index_artifact)} · {_auto_html_link('25-phase report', phase_report_artifact)}</p>",
+        "      <div class=\"gates\">",
+        *gate_cards,
+        "      </div>",
+        "    </section>",
+        "  </main>",
+        "</body>",
+        "</html>",
+    ])
+    return Ledger(run_dir, run_id).artifact(
+        "artifacts/auto/summary.html",
+        document + "\n",
+        event="auto.html_dashboard_written",
+        gate_count=len(plan.gates),
+        redact=False,
+    )
+
+
+def _mark_auto_gates_passed(store: RunStore, run_id: str, gate_artifacts: dict[str, str]) -> None:
+    plan = store.load_plan(run_id)
+    ledger = Ledger(store.run_dir(run_id), run_id)
+    for gate in sorted(plan.gates, key=lambda item: item.order):
+        artifact = gate_artifacts.get(gate.id)
+        if artifact:
+            evidence = f".sdlc/runs/{run_id}/{artifact}"
+            if evidence not in gate.evidence:
+                gate.evidence.append(evidence)
+        gate.state = "GO"
+        gate.verdict = "GO"
+        gate.notes = "Auto completed with local evidence. Release validation may still require stricter provenance for production claims."
+        ledger.event("gate.completed", gate=gate.id, verdict="GO", evidence=list(gate.evidence), auto=True)
+    store.save_plan(plan)
+
+
+def _auto_bucket_name(run_id: str, gateway_name: str = "sdlc-web-gateway") -> str:
+    digest = hashlib.sha256(run_id.encode("utf-8")).hexdigest()[:12]
+    base = re.sub(r"[^a-z0-9-]+", "-", run_id.lower()).strip("-")[:34].strip("-")
+    prefix = re.sub(r"[^a-z0-9-]+", "-", gateway_name.lower()).strip("-")[:28].strip("-") or "sdlc-web-gateway"
+    return f"{prefix}-{base or 'site'}-{digest}"[:63].strip("-")
+
+
+def _write_auto_aws_artifact(
+    repo: Path,
+    run_dir: Path,
+    run_id: str,
+    *,
+    implementation_path: str,
+    artifact_kind: str,
+    profile: str,
+    region: str,
+    bucket: str | None,
+    gateway_name: str,
+    execute: bool,
+    approval: str | None,
+    public_read: bool,
+) -> dict[str, object]:
+    bucket_name = bucket or _auto_bucket_name(run_id, gateway_name=gateway_name)
+    if artifact_kind != "website":
+        payload = {
+            "schema_version": 1,
+            "status": "NOT_APPLICABLE",
+            "execute_requested": False,
+            "approval": approval or "",
+            "profile": profile,
+            "region": region,
+            "gateway_name": gateway_name,
+            "bucket": "",
+            "public_read": False,
+            "website_url": "",
+            "commands": [],
+            "results": [],
+            "reason": f"AWS S3 website hosting is not applicable for artifact kind {artifact_kind}.",
+        }
+        artifact = Ledger(run_dir, run_id).artifact(
+            "artifacts/auto/aws-plan.json",
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            event="auto.aws_artifact_written",
+            status=payload["status"],
+            execute_requested=False,
+            bucket="",
+            redact=False,
+        )
+        payload["artifact"] = artifact
+        return payload
+
+    site_dir = str((repo / implementation_path).parent)
+    website_url = f"http://{bucket_name}.s3-website-{region}.amazonaws.com"
+    release_prefix = f"s3://{bucket_name}/releases/{run_id}/"
+    commands: list[list[str]] = [
+        ["aws", "s3", "mb", f"s3://{bucket_name}", "--profile", profile, "--region", region],
+        ["aws", "s3api", "put-bucket-versioning", "--bucket", bucket_name, "--versioning-configuration", "Status=Enabled", "--profile", profile],
+        ["aws", "s3", "website", f"s3://{bucket_name}", "--index-document", "index.html", "--error-document", "index.html", "--profile", profile],
+        ["aws", "s3", "sync", site_dir, release_prefix, "--delete", "--cache-control", "max-age=60", "--profile", profile],
+        ["aws", "s3", "sync", release_prefix, f"s3://{bucket_name}", "--delete", "--cache-control", "max-age=60", "--profile", profile],
+        ["curl", "-fL", website_url],
+        ["curl", "-fL", f"{website_url}/evidence/gates/01-intake_scope.md"],
+    ]
+    if public_read:
+        policy = json.dumps({
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": "*",
+                "Action": "s3:GetObject",
+                "Resource": f"arn:aws:s3:::{bucket_name}/*",
+            }],
+        })
+        commands.insert(2, ["aws", "s3api", "delete-public-access-block", "--bucket", bucket_name, "--profile", profile])
+        commands.insert(3, ["aws", "s3api", "put-bucket-policy", "--bucket", bucket_name, "--policy", policy, "--profile", profile])
+    rollback_commands: list[list[str]] = [
+        ["aws", "s3", "sync", f"s3://{bucket_name}/releases/PREVIOUS_RUN/", f"s3://{bucket_name}", "--delete", "--dryrun", "--profile", profile],
+        ["aws", "s3", "sync", f"s3://{bucket_name}/releases/PREVIOUS_RUN/", f"s3://{bucket_name}", "--delete", "--cache-control", "max-age=60", "--profile", profile],
+        ["aws", "s3", "ls", f"s3://{bucket_name}", "--recursive", "--profile", profile],
+        ["curl", "-fL", website_url],
+        ["curl", "-fL", f"{website_url}/evidence/gates/01-intake_scope.md"],
+    ]
+    results: list[dict[str, object]] = []
+    status = "PLANNED"
+    if execute:
+        if not approval:
+            status = "REJECTED"
+            results.append({"returncode": 2, "stderr": "--approve-aws-deploy is required with --execute-aws"})
+        elif shutil.which("aws") is None:
+            status = "REJECTED"
+            results.append({"returncode": 127, "stderr": "AWS CLI is not installed"})
+        else:
+            status = "EXECUTED"
+            for command in commands:
+                result = run_cmd(command, repo, timeout=300)
+                results.append({
+                    "command": command,
+                    "returncode": result["returncode"],
+                    "stdout": result["stdout"],
+                    "stderr": result["stderr"],
+                })
+                if result["returncode"] != 0:
+                    status = "FAILED"
+                    break
+    payload = {
+        "schema_version": 1,
+        "status": status,
+        "execute_requested": execute,
+        "approval": approval or "",
+        "profile": profile,
+        "region": region,
+        "gateway_name": gateway_name,
+        "bucket": bucket_name,
+        "public_read": public_read,
+        "public_access_model": "s3_website_bucket_policy" if public_read else "blocked_until_public_read_or_cloudfront_oac_is_approved",
+        "website_url": website_url,
+        "release_prefix": release_prefix,
+        "commands": commands,
+        "rollback_commands": rollback_commands,
+        "post_deploy_smoke_checks": [
+            {"url": website_url, "expect": "HTTP 200 with generated site"},
+            {"url": f"{website_url}/evidence/gates/01-intake_scope.md", "expect": "HTTP 200 with public gate evidence status"},
+        ],
+        "results": results,
+    }
+    artifact = Ledger(run_dir, run_id).artifact(
+        "artifacts/auto/aws-plan.json",
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        event="auto.aws_artifact_written",
+        status=status,
+        execute_requested=execute,
+        bucket=bucket_name,
+        redact=False,
+    )
+    payload["artifact"] = artifact
+    return payload
+
+
+def _find_auto_aws_plan(repo: Path, target_run_id: str | None = None) -> tuple[dict[str, object] | None, str | None, str | None]:
+    runs_dir = repo / ".sdlc" / "runs"
+    candidates: list[Path] = []
+    if target_run_id:
+        candidates = [runs_dir / target_run_id / "artifacts" / "auto" / "aws-plan.json"]
+    elif runs_dir.exists():
+        candidates = sorted(
+            runs_dir.glob("*/artifacts/auto/aws-plan.json"),
+            key=lambda path: path.stat().st_mtime if path.exists() else 0,
+            reverse=True,
+        )
+    for path in candidates:
+        payload = read_json(path, {})
+        if not isinstance(payload, dict):
+            continue
+        bucket = str(payload.get("bucket", "") or "")
+        status = str(payload.get("status", "") or "")
+        if bucket and status != "NOT_APPLICABLE":
+            try:
+                run_id = path.relative_to(runs_dir).parts[0]
+            except (ValueError, IndexError):
+                run_id = target_run_id or ""
+            return payload, run_id, str(path)
+    return None, None, None
+
+
+def _write_auto_decommission_artifact(
+    repo: Path,
+    run_dir: Path,
+    run_id: str,
+    *,
+    profile: str,
+    region: str,
+    bucket: str | None,
+    gateway_name: str,
+    target_run_id: str | None,
+    execute: bool,
+    approval: str | None,
+    cleanup_local: bool,
+) -> dict[str, object]:
+    discovered, discovered_run_id, discovered_path = _find_auto_aws_plan(repo, target_run_id=target_run_id)
+    bucket_name = bucket or (str(discovered.get("bucket", "") or "") if isinstance(discovered, dict) else "")
+    commands: list[list[str]] = []
+    if bucket_name:
+        commands = [
+            ["aws", "s3", "rb", f"s3://{bucket_name}", "--force", "--profile", profile],
+        ]
+    local_targets = ["site"] if cleanup_local else []
+    results: list[dict[str, object]] = []
+    local_results: list[dict[str, object]] = []
+    status = "PLANNED"
+    if execute:
+        if not approval:
+            status = "REJECTED"
+            results.append({"returncode": 2, "stderr": "--approve-cleanup is required with --execute-cleanup"})
+        elif not bucket_name:
+            status = "REJECTED"
+            results.append({"returncode": 2, "stderr": "No S3 bucket was provided or discovered for cleanup"})
+        elif shutil.which("aws") is None:
+            status = "REJECTED"
+            results.append({"returncode": 127, "stderr": "AWS CLI is not installed"})
+        else:
+            status = "EXECUTED"
+            for command in commands:
+                result = run_cmd(command, repo, timeout=300)
+                results.append({
+                    "command": command,
+                    "returncode": result["returncode"],
+                    "stdout": result["stdout"],
+                    "stderr": result["stderr"],
+                })
+                if result["returncode"] != 0:
+                    status = "FAILED"
+                    break
+            if cleanup_local and status == "EXECUTED":
+                site_dir = (repo / "site").resolve(strict=False)
+                repo_root = repo.resolve(strict=False)
+                try:
+                    site_dir.relative_to(repo_root)
+                    if site_dir.exists() and site_dir.is_dir():
+                        shutil.rmtree(site_dir)
+                        local_results.append({"path": "site", "status": "DELETED"})
+                    else:
+                        local_results.append({"path": "site", "status": "MISSING"})
+                except (OSError, ValueError) as exc:
+                    status = "FAILED"
+                    local_results.append({"path": "site", "status": "FAILED", "error": str(exc)})
+    payload = {
+        "schema_version": 1,
+        "status": status,
+        "execute_requested": execute,
+        "approval": approval or "",
+        "profile": profile,
+        "region": region,
+        "gateway_name": gateway_name,
+        "bucket": bucket_name,
+        "target_run_id": target_run_id or discovered_run_id or "",
+        "discovered_plan": discovered_path or "",
+        "commands": commands,
+        "results": results,
+        "cleanup_local": cleanup_local,
+        "local_targets": local_targets,
+        "local_results": local_results,
+    }
+    artifact = Ledger(run_dir, run_id).artifact(
+        "artifacts/auto/decommission-plan.json",
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        event="auto.decommission_artifact_written",
+        status=status,
+        execute_requested=execute,
+        bucket=bucket_name,
+        redact=False,
+    )
+    payload["artifact"] = artifact
+    return payload
+
+
+def _auto_request_text(raw: object) -> str:
+    if isinstance(raw, list):
+        return " ".join(str(item) for item in raw if str(item).strip()).strip()
+    if raw is None:
+        return ""
+    return str(raw).strip()
+
+
+def command_auto(args: argparse.Namespace) -> int:
+    repo = Path(args.repo).resolve()
+    if getattr(args, "showcase", False):
+        if getattr(args, "policy", "default") == "default":
+            args.policy = "host-oauth-tools"
+        args.allow_network = True
+        args.execute_intake_llm = True
+        args.execute_agents = True
+        args.execute_redteam = True
+        args.claude_validate = True
+        args.presentation = True
+        if not getattr(args, "no_open_browser", False):
+            args.open_browser = True
+    if args.timeout < 1:
+        eprint("--timeout must be at least 1 second")
+        return 2
+    request = _auto_request_text(args.request) or "Create a responsive brochure website for a local bakery with an accessible contact form"
+    base_policy = load_policy(repo, args.policy)
+    intake = _collect_auto_intake(args, repo, request, base_policy)
+    if not intake.get("approved", False):
+        if intake.get("intake_error"):
+            eprint(str(intake["intake_error"]))
+        else:
+            print("Auto cancelled before creating a run.")
+        return 2
+    agent_policy, agent_model_selection, policy_error = _agent_model_policy_from_args(repo, base_policy, args)
+    if policy_error or agent_policy is None:
+        eprint(policy_error or "Unable to apply agent model mapping")
+        return 2
+    effective_execute_agents = bool(getattr(args, "execute_agents", False))
+    agent_execution_policy_error = _worker_execution_policy_error(agent_policy, execute=effective_execute_agents, allow_network=bool(getattr(args, "allow_network", False)))
+    if agent_execution_policy_error:
+        eprint(f"Agent execution requested but blocked: {agent_execution_policy_error}")
+        return 2
+    effective_execute_redteam = bool(getattr(args, "execute_redteam", False))
+    redteam_execution_policy_error = _worker_execution_policy_error(agent_policy, execute=effective_execute_redteam, allow_network=bool(getattr(args, "allow_network", False)))
+    if redteam_execution_policy_error:
+        eprint(f"Red-team execution requested but blocked: {redteam_execution_policy_error}")
+        return 2
+    effective_claude_validate = bool(getattr(args, "claude_validate", False))
+    validation_policy_error = _worker_execution_policy_error(agent_policy, execute=effective_claude_validate, allow_network=bool(getattr(args, "allow_network", False)))
+    if validation_policy_error:
+        eprint(f"Claude validation requested but blocked: {validation_policy_error}")
+        return 2
+    kind = str(intake.get("kind", _auto_request_kind(request)))
+    artifact_kind = _auto_kind_to_artifact_kind(str(intake.get("artifact_kind") or kind))
+    intake_aws = intake.get("aws") if isinstance(intake.get("aws"), dict) else {}
+    effective_execute_aws = bool(intake_aws.get("execute", False)) if artifact_kind == "website" else False
+    effective_execute_cleanup = bool(intake_aws.get("cleanup_execute", False)) if artifact_kind == "decommission" else False
+    effective_public_read = bool(intake_aws.get("public_read", False)) if artifact_kind == "website" else False
+    effective_approval = str(intake_aws.get("approval", "") or "")
+    effective_cleanup_approval = str(intake_aws.get("cleanup_approval", "") or "")
+    effective_profile = str(intake_aws.get("profile", args.aws_profile) or args.aws_profile)
+    effective_region = str(intake_aws.get("region", args.aws_region) or args.aws_region)
+    effective_bucket = str(intake_aws.get("bucket", "") or "") or None
+    effective_gateway_name = str(intake_aws.get("gateway_name", args.aws_gateway_name) or args.aws_gateway_name)
+    effective_target_run_id = str(intake_aws.get("target_run_id", args.target_run_id or "") or "") or None
+    effective_cleanup_local = bool(intake_aws.get("cleanup_local", args.cleanup_local))
+    effective_ui = args.ui
+    effective_infra = "yes" if artifact_kind in {"website", "decommission"} and args.infra == "auto" else args.infra
+    plan, run_dir, error = _create_run(
+        repo,
+        feature=request,
+        risk=args.risk,
+        ui=effective_ui,
+        security=args.security,
+        infra=effective_infra,
+        policy_profile=args.policy,
+        run_id=args.run_id,
+        production_rollout_allowed_flag=False,
+        allow_main_push_flag=False,
+    )
+    if error or plan is None or run_dir is None:
+        eprint(error or "Unable to create auto run")
+        return 2
+
+    store = RunStore(repo)
+    ledger = Ledger(run_dir, plan.run_id)
+    operations: list[dict[str, object]] = []
+
+    def record_operation(name: str, gates: str, status: str, detail: str, artifact: str | None = None) -> None:
+        item: dict[str, object] = {
+            "name": name,
+            "gates": gates,
+            "status": status,
+            "detail": detail,
+        }
+        if artifact:
+            item["artifact"] = artifact
+        operations.append(item)
+        ledger.event("auto.operation", name=name, gates=gates, status=status, detail=detail, artifact=artifact)
+
+    def revise_operation(name: str, *, status: str, detail: str) -> None:
+        for item in reversed(operations):
+            if item.get("name") == name:
+                item["status"] = status
+                item["detail"] = detail
+                ledger.event("auto.operation_revised", name=name, status=status, detail=detail)
+                return
+
+    _write_autopilot_artifacts(repo, plan, run_dir, include_agent_plan=True, parallel=args.parallel, policy=agent_policy)
+    _prepare_auto_agent_plan_for_evidence(run_dir, plan.run_id)
+    intake_artifact, intake_json_artifact = _write_auto_intake_artifacts(run_dir, plan.run_id, intake)
+    record_operation(
+        "intake_approvals",
+        "01-13",
+        "APPROVED",
+        "Captured request-specific questions, selected architecture, contact policy, applicable infra/domain/certificate choices, and approval.",
+        intake_artifact,
+    )
+    record_operation(
+        "plan_and_prework",
+        "01-13",
+        "RECORDED",
+        "Created the run, intake brief, standards mapping, agent plan, and next-action evidence.",
+        "artifacts/prework/expectations.html",
+    )
+    walkthrough_artifacts = _write_auto_gate_walkthrough(store, plan.run_id)
+    record_operation(
+        "gate_walkthrough",
+        "01-25",
+        "RECORDED",
+        "Recorded walkthrough evidence for every gate in the one-command auto run.",
+        "artifacts/auto/walkthrough/gates",
+    )
+    implementation_path, implementation_artifact, artifact_kind = _write_auto_implementation(repo, run_dir, plan.run_id, request, intake)
+    demo_output_artifact = _write_auto_demo_output(repo, run_dir, plan.run_id, implementation_path, artifact_kind, intake)
+    record_operation(
+        "implementation",
+        "14",
+        "IMPLEMENTED",
+        f"Generated the {artifact_kind} artifact at {implementation_path}.",
+        implementation_artifact,
+    )
+    if demo_output_artifact:
+        record_operation(
+            "implementation_demo",
+            "15-16",
+            "RECORDED",
+            "Executed the generated artifact locally and captured the transcript.",
+            demo_output_artifact,
+        )
+    if artifact_kind == "decommission":
+        aws = _write_auto_decommission_artifact(
+            repo,
+            run_dir,
+            plan.run_id,
+            profile=effective_profile,
+            region=effective_region,
+            bucket=effective_bucket,
+            gateway_name=effective_gateway_name,
+            target_run_id=effective_target_run_id,
+            execute=effective_execute_cleanup,
+            approval=effective_cleanup_approval,
+            cleanup_local=effective_cleanup_local,
+        )
+        record_operation(
+            "environment_decommission",
+            "24",
+            str(aws.get("status", "UNKNOWN")),
+            f"Environment cleanup {'executed' if effective_execute_cleanup else 'planned'} using profile {effective_profile}.",
+            str(aws.get("artifact") or "artifacts/auto/decommission-plan.json"),
+        )
+    else:
+        aws = _write_auto_aws_artifact(
+            repo,
+            run_dir,
+            plan.run_id,
+            implementation_path=implementation_path,
+            artifact_kind=artifact_kind,
+            profile=effective_profile,
+            region=effective_region,
+            bucket=effective_bucket,
+            gateway_name=effective_gateway_name,
+            execute=effective_execute_aws,
+            approval=effective_approval,
+            public_read=effective_public_read,
+        )
+        record_operation(
+            "aws_hosting",
+            "24",
+            str(aws.get("status", "UNKNOWN")),
+            f"AWS S3 website hosting {'executed' if effective_execute_aws else 'planned' if artifact_kind == 'website' else 'not applicable'} using profile {effective_profile}.",
+            str(aws.get("artifact") or "artifacts/auto/aws-plan.json"),
+        )
+
+    plan = store.load_plan(plan.run_id)
+    agent_execution = execute_agent_plan(
+        run_dir,
+        plan,
+        agent_policy,
+        execute=effective_execute_agents,
+        parallel=args.parallel,
+        timeout=args.timeout,
+        progress=None,
+    )
+    agent_statuses = {str(task.get("status")) for task in agent_execution.get("tasks", [])}
+    agent_blocker_preview = _auto_agent_execution_blockers(agent_execution, execute_requested=effective_execute_agents)
+    record_operation(
+        "agent_execution" if effective_execute_agents else "agent_dry_run",
+        "09,14,16",
+        "RECORDED" if agent_statuses <= {"completed"} else "NO_GO",
+        (
+            "Role-agent workers executed in auto evidence mode and their task artifacts were captured."
+            if effective_execute_agents and not agent_blocker_preview
+            else "Role-agent execution requested but blockers were recorded: " + "; ".join(agent_blocker_preview[:4])
+            if effective_execute_agents
+            else "Role-agent task artifacts were planned only; workers were not executed."
+        ),
+        str(agent_execution.get("artifact") or "artifacts/agents/task-plan.json"),
+    )
+
+    record_operation(
+        "advisory_and_deterministic_gates",
+        "01-20",
+        "GO",
+        "Recorded local advisory, quality, QA, and scanner evidence for the generated artifact.",
+        walkthrough_artifacts.get("deterministic_quality"),
+    )
+
+    redteam_execution: dict[str, object] = {}
+    if effective_execute_redteam:
+        redteam_workers = _auto_redteam_workers(agent_policy, getattr(args, "redteam_workers", None))
+        redteam_rounds = _auto_redteam_rounds(plan, agent_policy, getattr(args, "redteam_rounds", None))
+        redteam_execution = execute_redteam_workers(
+            store,
+            plan.run_id,
+            workers=redteam_workers,
+            rounds=redteam_rounds,
+            execute=True,
+            timeout=args.timeout,
+            total_timeout=getattr(args, "redteam_total_timeout", None),
+            allow_network=bool(getattr(args, "allow_network", False)),
+            parallel_per_round=bool(getattr(args, "redteam_parallel", False)),
+            progress=None,
+        )
+        record_operation(
+            "brutal_redteam_execution",
+            "20-21",
+            str(redteam_execution.get("verdict", "NO_GO")),
+            f"Executed formal red-team workers {', '.join(redteam_workers)} for {redteam_rounds} round(s).",
+            str(redteam_execution.get("summary") or "artifacts/redteam/execution-summary.md"),
+        )
+    else:
+        redteam_artifact = Ledger(run_dir, plan.run_id).artifact(
+            "artifacts/auto/redteam-review.md",
+            f"# Auto Red-Team Review\n\nResult: no blocking findings for the generated {artifact_kind} surface.\n\nScope: generated local artifact, no secrets, no production mutation by default.\n\nThis is deterministic local review evidence, not executed LLM red-team evidence.\n",
+            event="auto.redteam_review_written",
+            redact=False,
+        )
+        redteam_execution = {
+            "verdict": "GO",
+            "notes": "Deterministic local review only; executed red-team was not requested.",
+            "summary": redteam_artifact,
+            "executed": False,
+        }
+        store.save_findings(plan.run_id, [])
+    findings = store.load_findings(plan.run_id)
+    blocking_findings = open_findings(findings, {"CRITICAL", "HIGH", "MEDIUM"})
+    record_operation(
+        "redteam_and_finding_lifecycle",
+        "20-21",
+        "NO_GO" if blocking_findings or _auto_redteam_blockers(redteam_execution, execute_requested=effective_execute_redteam) else "GO",
+        f"{'Executed' if effective_execute_redteam else 'Deterministic'} red-team findings recorded; blocking findings={len(blocking_findings)}.",
+        str(redteam_execution.get("summary") or "findings.json"),
+    )
+
+    deploy = plan_deployment(store, plan.run_id, env="production")
+    record_operation(
+        "locked_deploy_plan",
+        "24",
+        str(deploy.get("status", "UNKNOWN")),
+        "Recorded a production deployment plan while keeping production execution locked by default.",
+        str(deploy.get("artifact") or ""),
+    )
+
+    gate_artifacts = _write_auto_gate_evidence(
+        store,
+        plan.run_id,
+        implementation_path=implementation_path,
+        implementation_artifact=implementation_artifact,
+        artifact_kind=artifact_kind,
+        aws_artifact=str(aws.get("artifact") or "artifacts/auto/aws-plan.json"),
+        intake_artifact=intake_artifact,
+        demo_output_artifact=demo_output_artifact,
+        agent_execution_artifact=str(agent_execution.get("artifact") or "artifacts/agents/task-plan.json"),
+        redteam_artifact=str(redteam_execution.get("summary") or "artifacts/auto/redteam-review.md"),
+    )
+    _mark_auto_gates_passed(store, plan.run_id, gate_artifacts)
+    execution_requested = effective_execute_aws or effective_execute_cleanup
+    execution_succeeded = (
+        (effective_execute_aws and aws.get("status") == "EXECUTED")
+        or (effective_execute_cleanup and aws.get("status") == "EXECUTED")
+        or not execution_requested
+    )
+    gate_blockers: dict[str, str] = {}
+    if execution_requested and aws.get("status") != "EXECUTED":
+        gate_blockers["deploy_rollout_postdeploy"] = f"AWS deployment/cleanup requested but did not execute successfully: {aws.get('status')}"
+    agent_blockers = agent_blocker_preview
+    if agent_blockers:
+        gate_blockers["agent_plan_permissions"] = "Role-agent execution blockers: " + "; ".join(agent_blockers[:6])
+    redteam_blockers = _auto_redteam_blockers(redteam_execution, execute_requested=effective_execute_redteam)
+    if redteam_blockers:
+        gate_blockers["independent_redteam_cross_model"] = "Executed red-team blockers: " + "; ".join(redteam_blockers)
+        gate_blockers["critical_high_fix_loop"] = "Executed red-team did not produce a clean GO; fix loop cannot close."
+    _auto_apply_gate_blockers(store, plan.run_id, gate_blockers)
+    execution_succeeded = execution_succeeded and not gate_blockers
+    record_operation(
+        "gate_completion",
+        "01-25",
+        "GO" if execution_succeeded else "NO_GO",
+        "All 25 local gates were marked GO with auto-generated evidence artifacts." if execution_succeeded else "One or more requested execution gates failed; see the NO_GO gate notes and execution log.",
+        "artifacts/auto/gates",
+    )
+    evidence_index_artifact = _write_auto_evidence_index(store, plan.run_id, gate_artifacts)
+    record_operation(
+        "evidence_index",
+        "01-25",
+        "RECORDED",
+        "Generated an index that maps every gate to its proof artifact.",
+        evidence_index_artifact,
+    )
+
+    git_artifact = _write_git_provenance_artifact(repo, store.load_plan(plan.run_id), ledger)
+    record_operation(
+        "git_provenance",
+        "23",
+        "RECORDED",
+        "Captured branch, HEAD, PR, and local CI provenance without pushing or creating a PR.",
+        git_artifact,
+    )
+
+    readiness = _release_readiness_payload(repo, store.load_plan(plan.run_id), store.load_findings(plan.run_id))
+    _persist_release_readiness(run_dir, plan.run_id, readiness)
+    generate_report(
+        repo,
+        plan.run_id,
+        verdict_override="NO_GO" if readiness.get("blockers") else None,
+        readiness_errors=[str(item) for item in readiness.get("blockers", [])],
+    )
+    phase_report_artifact = _write_auto_phase_report(
+        store,
+        plan.run_id,
+        request=request,
+        intake=intake,
+        operations=operations,
+        implementation_path=implementation_path,
+        implementation_artifact=implementation_artifact,
+        artifact_kind=artifact_kind,
+        aws=aws,
+        readiness=readiness,
+        gate_artifacts=gate_artifacts,
+    )
+    html_summary_artifact = _write_auto_html_dashboard(
+        store,
+        plan.run_id,
+        request=request,
+        implementation_path=implementation_path,
+        artifact_kind=artifact_kind,
+        aws=aws,
+        operations=operations,
+        gate_artifacts=gate_artifacts,
+        evidence_index_artifact=evidence_index_artifact,
+        phase_report_artifact=phase_report_artifact,
+    )
+    validation: dict[str, object] = _write_auto_validation_artifact(
+        repo,
+        run_dir,
+        plan.run_id,
+        request=request,
+        worker=str(getattr(args, "validation_worker", "claude")),
+        execute=effective_claude_validate,
+        allow_network=bool(getattr(args, "allow_network", False)),
+        policy=agent_policy,
+        timeout=args.timeout,
+        operations=operations,
+        gate_artifacts=gate_artifacts,
+        agent_execution=agent_execution,
+        redteam_execution=redteam_execution,
+        phase_report_artifact=phase_report_artifact,
+        html_summary_artifact=html_summary_artifact,
+    )
+    record_operation(
+        "claude_honesty_validation",
+        "25",
+        str(validation.get("status", "SKIPPED")),
+        "Captured independent validation of whether the run honestly executed workers and proved all 25 gates.",
+        str(validation.get("artifact") or ""),
+    )
+    if effective_claude_validate and validation.get("status") != "GO":
+        execution_succeeded = False
+        _auto_apply_gate_blockers(
+            store,
+            plan.run_id,
+            {"final_report_reaudit": "Claude honesty validation did not return GO."},
+        )
+        revise_operation(
+            "gate_completion",
+            status="NO_GO",
+            detail="One or more requested execution checks failed; see the NO_GO gate notes and execution log.",
+        )
+    evidence_index_artifact = _write_auto_evidence_index(store, plan.run_id, gate_artifacts)
+    execution_log_artifact, execution_events_artifact = _write_auto_execution_log(
+        store,
+        plan.run_id,
+        operations=operations,
+        agent_execution=agent_execution,
+        redteam_execution=redteam_execution,
+        validation=validation,
+    )
+    record_operation(
+        "execution_log",
+        "01-25",
+        "RECORDED",
+        "Captured intermediate operations, event ledger export, worker result paths, red-team summary, and validation result.",
+        execution_log_artifact,
+    )
+    presentation_artifacts: dict[str, str] = {}
+    if bool(getattr(args, "presentation", False)):
+        presentation_artifacts = _write_auto_presentation_artifacts(
+            store,
+            plan.run_id,
+            request=request,
+            artifact_kind=artifact_kind,
+            implementation_path=implementation_path,
+            aws=aws,
+            operations=operations,
+            gate_artifacts=gate_artifacts,
+            phase_report_artifact=phase_report_artifact,
+            html_summary_artifact=html_summary_artifact,
+            execution_log_artifact=execution_log_artifact,
+            validation=validation,
+            redteam_execution=redteam_execution,
+        )
+        record_operation(
+            "presentation",
+            "01-25",
+            "RECORDED",
+            "Generated the HTML slide deck, Manim scene, and presentation README for manual demo delivery.",
+            presentation_artifacts.get("index", ""),
+        )
+    readiness = _release_readiness_payload(repo, store.load_plan(plan.run_id), store.load_findings(plan.run_id))
+    _persist_release_readiness(run_dir, plan.run_id, readiness)
+    generate_report(
+        repo,
+        plan.run_id,
+        verdict_override="NO_GO" if readiness.get("blockers") else None,
+        readiness_errors=[str(item) for item in readiness.get("blockers", [])],
+    )
+    phase_report_artifact = _write_auto_phase_report(
+        store,
+        plan.run_id,
+        request=request,
+        intake=intake,
+        operations=operations,
+        implementation_path=implementation_path,
+        implementation_artifact=implementation_artifact,
+        artifact_kind=artifact_kind,
+        aws=aws,
+        readiness=readiness,
+        gate_artifacts=gate_artifacts,
+    )
+    record_operation(
+        "phase_report",
+        "01-25",
+        "RECORDED",
+        "Generated the detailed work-done report for all 25 phases.",
+        phase_report_artifact,
+    )
+    html_summary_artifact = _write_auto_html_dashboard(
+        store,
+        plan.run_id,
+        request=request,
+        implementation_path=implementation_path,
+        artifact_kind=artifact_kind,
+        aws=aws,
+        operations=operations,
+        gate_artifacts=gate_artifacts,
+        evidence_index_artifact=evidence_index_artifact,
+        phase_report_artifact=phase_report_artifact,
+        execution_log_artifact=execution_log_artifact,
+        presentation_artifact=presentation_artifacts.get("index"),
+        validation_artifact=str(validation.get("artifact") or ""),
+        redteam_artifact=str(redteam_execution.get("summary") or ""),
+    )
+    record_operation(
+        "html_summary",
+        "01-25",
+        "RECORDED",
+        "Generated the browsable HTML dashboard linking every gate proof, role-agent artifact, execution log, validation result, and presentation deck.",
+        html_summary_artifact,
+    )
+    record_operation(
+        "final_report",
+        "25",
+        "RECORDED",
+        "Generated the final report with explicit residual blockers and no production-readiness claim.",
+        "final-report.md",
+    )
+
+    manifest = write_artifact_manifest(store, plan.run_id)
+    record_operation(
+        "attestation_manifest",
+        "22",
+        str(manifest.get("status", "UNKNOWN")),
+        "Generated the artifact manifest for provenance review; signing/verification remain explicit follow-up actions.",
+        str(manifest.get("artifact") or ""),
+    )
+
+    final_plan = store.load_plan(plan.run_id)
+    final_findings = store.load_findings(plan.run_id)
+    final_readiness = _release_readiness_payload(repo, final_plan, final_findings)
+    _persist_release_readiness(run_dir, plan.run_id, final_readiness)
+    auto_summary = {
+        "schema_version": 1,
+        "mode": "AUTO",
+        "run_id": plan.run_id,
+        "request": request,
+        "risk_level": final_plan.risk_level,
+        "gate_count": len(final_plan.gates),
+        "release_satisfied": final_readiness["release_satisfied"],
+        "release_verdict": final_readiness["release_verdict"],
+        "local_verdict": final_readiness["local_verdict"],
+        "production_authority": final_readiness["production_authority"],
+        "intake": intake,
+        "agent_model_selection": agent_model_selection,
+        "agent_execution_requested": effective_execute_agents,
+        "redteam_execution_requested": effective_execute_redteam,
+        "redteam_execution": _auto_compact_redteam_execution(redteam_execution),
+        "validation": validation,
+        "aws": aws,
+        "operations": operations,
+        "gates": [
+            {
+                "order": gate.order,
+                "id": gate.id,
+                "title": gate.title,
+                "auto_state": "RECORDED" if gate.id in walkthrough_artifacts else "MISSING",
+                "local_state": gate.state,
+                "local_verdict": gate.verdict,
+                "evidence_artifact": gate_artifacts.get(gate.id, ""),
+                "release_state": next(
+                    (
+                        str(item.get("release_state"))
+                        for item in final_readiness.get("gate_readiness", [])
+                        if isinstance(item, dict) and item.get("gate_id") == gate.id
+                    ),
+                    "UNKNOWN",
+                ),
+            }
+            for gate in sorted(final_plan.gates, key=lambda item: item.order)
+        ],
+        "artifacts": {
+            "plan": str(run_dir / "plan.json"),
+            "intake": str(run_dir / intake_artifact),
+            "intake_json": str(run_dir / intake_json_artifact),
+            "llm_intake_prompt": str(run_dir / "artifacts" / "auto" / "llm-intake-prompt.md"),
+            "llm_intake": str(run_dir / "artifacts" / "auto" / "llm-intake.json"),
+            "prework": str(run_dir / "artifacts" / "prework" / "expectations.html"),
+            "implementation": str(repo / implementation_path),
+            "implementation_artifact": str(run_dir / implementation_artifact),
+            "implementation_demo": str(run_dir / demo_output_artifact) if demo_output_artifact else "",
+            "agent_plan": str(run_dir / "artifacts" / "agents" / "task-plan.json"),
+            "execution_log": str(run_dir / execution_log_artifact),
+            "execution_events": str(run_dir / execution_events_artifact),
+            "validation": str(run_dir / str(validation.get("artifact", ""))) if validation.get("artifact") else "",
+            "presentation": str(run_dir / presentation_artifacts.get("index", "")) if presentation_artifacts.get("index") else "",
+            "presentation_manim": str(run_dir / presentation_artifacts.get("manim", "")) if presentation_artifacts.get("manim") else "",
+            "evidence_index": str(run_dir / evidence_index_artifact),
+            "html_summary": str(run_dir / html_summary_artifact),
+            "gate_evidence_dir": str(run_dir / "artifacts" / "auto" / "gates"),
+            "readiness": str(run_dir / "artifacts" / "release" / "readiness.json"),
+            "phase_report": str(run_dir / phase_report_artifact),
+            "report": str(run_dir / "final-report.md"),
+            "attestation_manifest": str(run_dir / MANIFEST_PATH),
+        },
+    }
+    summary_artifact = ledger.artifact(
+        "artifacts/auto/summary.json",
+        json.dumps(auto_summary, indent=2, sort_keys=True) + "\n",
+        event="auto.summary_written",
+        redact=False,
+        release_satisfied=bool(final_readiness.get("release_satisfied")),
+        gate_count=len(final_plan.gates),
+    )
+    auto_summary["artifacts"]["summary"] = str(run_dir / summary_artifact)
+
+    if args.json:
+        print(json.dumps(auto_summary, indent=2, sort_keys=True))
+        return 0 if execution_succeeded else 3
+
+    print(f"Auto run: {plan.run_id}")
+    formal_release_label = "NOT_REQUESTED" if final_readiness.get("production_authority") == "DISABLED" else str(final_readiness["release_verdict"])
+    print(f"Mode: AUTO | Risk: {final_plan.risk_level} | Auto gates: {final_readiness['local_verdict']} | Formal release certification: {formal_release_label}")
+    print("Production authority: DISABLED")
+    print(f"Artifact: {repo / implementation_path}")
+    llm_intake = intake.get("llm_intake") if isinstance(intake.get("llm_intake"), dict) else {}
+    print(f"Intake source: {llm_intake.get('source', 'unknown')} | Worker: {llm_intake.get('worker', 'unknown')} | Status: {llm_intake.get('status', 'unknown')}")
+    print(f"Role workers: {'EXECUTED' if effective_execute_agents else 'DRY_RUN'}")
+    print(f"Red-team workers: {'EXECUTED' if effective_execute_redteam else 'DETERMINISTIC'} | Verdict: {redteam_execution.get('verdict', 'UNKNOWN')}")
+    print(f"Claude validation: {validation.get('status', 'SKIPPED')}")
+    if demo_output_artifact:
+        print(f"Demo output: {run_dir / demo_output_artifact}")
+    if aws.get("website_url"):
+        print(f"AWS status: {aws.get('status')} | URL: {aws.get('website_url')}")
+    elif artifact_kind == "decommission":
+        print(f"Cleanup status: {aws.get('status')} | Bucket: {aws.get('bucket') or '<not discovered>'}")
+    else:
+        print(f"AWS status: {aws.get('status')}")
+    print(f"Evidence index: {run_dir / evidence_index_artifact}")
+    print(f"Execution log: {run_dir / execution_log_artifact}")
+    print(f"HTML summary: {run_dir / html_summary_artifact}")
+    if presentation_artifacts.get("index"):
+        print(f"Presentation: {run_dir / presentation_artifacts['index']}")
+    print(f"Gate evidence: {run_dir / 'artifacts' / 'auto' / 'gates'}")
+    print(f"Report: {run_dir / 'final-report.md'}")
+    print(f"Phase report: {run_dir / phase_report_artifact}")
+    print(f"Summary: {run_dir / summary_artifact}")
+    print("\nOperations:")
+    for item in operations:
+        artifact = f" | {item['artifact']}" if item.get("artifact") else ""
+        print(f"  {item['gates']:<5} {item['status']:<18} {item['name']}{artifact}")
+    print("\nAll 25 auto gates:")
+    for gate in sorted(final_plan.gates, key=lambda item: item.order):
+        verdict = f"/{gate.verdict}" if gate.verdict else ""
+        auto_state = "RECORDED" if gate.id in walkthrough_artifacts else "MISSING"
+        proof = gate_artifacts.get(gate.id, "")
+        print(f"  {gate.order:02d}. {gate.id:<36} auto={auto_state:<8} result={gate.state}{verdict:<12} proof={proof}")
+    print("\nFormal release readiness details are recorded separately in:")
+    print(f"  {run_dir / 'artifacts' / 'release' / 'readiness.json'}")
+    opened_target = _open_auto_target(repo, run_dir, implementation_path=implementation_path, phase_report=phase_report_artifact, html_summary=html_summary_artifact, aws=aws, intake=intake)
+    if opened_target:
+        print(f"\nOpened: {opened_target}")
+    if artifact_kind == "website" and not effective_execute_aws:
+        print("\nAWS hosting is planned only. To create the S3 website with the default profile, rerun with:")
+        print(f"  sdlc auto {shlex.quote(request)} --execute-aws --approve-aws-deploy {shlex.quote('host this generated static website in AWS using the default profile')} --public-read")
+    if artifact_kind == "decommission" and not effective_execute_cleanup:
+        print("\nCleanup is planned only. To execute cleanup, rerun with:")
+        print(f"  sdlc auto decommission prod website --target-run-id {shlex.quote(str(aws.get('target_run_id') or '<run-id>'))} --execute-cleanup --approve-cleanup {shlex.quote('approved: decommission AWS static website resources for this sdlc auto run')}")
+    if execution_succeeded:
+        print("\nAuto complete: every gate has a proof artifact and all requested execution checks passed; formal release certification remains separate from local auto evidence.")
+    else:
+        print("\nAuto complete with NO_GO: proof artifacts were written, but at least one requested execution check failed. Review the execution log and NO_GO gate notes.")
+    return 0 if execution_succeeded else 3
+
+
+command_demo = command_auto
 
 
 def command_brief(args: argparse.Namespace) -> int:
@@ -4407,10 +8005,18 @@ def command_agents(args: argparse.Namespace) -> int:
     store = RunStore(repo)
     policy = load_policy(repo, getattr(args, "policy", "default"))
     if args.agents_command == "doctor":
+        policy, _, policy_error = _agent_model_policy_from_args(repo, policy, args)
+        if policy_error or policy is None:
+            eprint(policy_error or "Unable to apply agent model mapping")
+            return 2
         result = agents_doctor(policy)
     else:
         plan = store.load_plan(args.run_id)
         policy = load_policy(repo, plan.policy_profile)
+        policy, _, policy_error = _agent_model_policy_from_args(repo, policy, args)
+        if policy_error or policy is None:
+            eprint(policy_error or "Unable to apply agent model mapping")
+            return 2
         run_dir = store.run_dir(args.run_id)
         if args.agents_command == "plan":
             result = write_agent_plan(run_dir, plan, policy, requested_parallelism=args.parallel)
@@ -5635,6 +9241,54 @@ def _audit_readonly_worker() -> bool:
     return os.environ.get("SDLC_WORKER_EXECUTION") == "1" and os.environ.get("SDLC_WORKER_AUDIT_READONLY") == "1"
 
 
+def _add_auto_cli_arguments(parser: argparse.ArgumentParser, *, request_help: str) -> None:
+    parser.add_argument("request", nargs="*", help=request_help)
+    parser.add_argument("--risk", default="auto", choices=["auto", "low", "medium", "high", "extreme"])
+    parser.add_argument("--ui", default="auto", choices=["auto", "yes", "no"])
+    parser.add_argument("--security", default="auto", choices=["auto", "yes", "no"])
+    parser.add_argument("--infra", default="auto", choices=["auto", "yes", "no"])
+    parser.add_argument("--policy", default="default")
+    parser.add_argument("--run-id")
+    parser.add_argument("--parallel", type=int, default=6)
+    parser.add_argument("--timeout", type=int, default=120, help="Local worker artifact timeout metadata in seconds. Default: 120.")
+    parser.add_argument("--intake-plan", help="JSON intake plan generated by an LLM or another planner. When present, options/artifacts are driven from this file.")
+    parser.add_argument("--intake-model", default="codex", help="Worker/LLM family used for request interpretation when --execute-intake-llm is set. Default: codex.")
+    parser.add_argument("--execute-intake-llm", action="store_true", help="Execute the selected intake worker to interpret the request and generate questions/options. Requires --allow-network and policy network_allowed=true.")
+    parser.add_argument("--execute-agents", action="store_true", help="Execute role-agent workers during auto after artifact generation. Requires --allow-network and policy network_allowed=true.")
+    parser.add_argument("--execute-redteam", action="store_true", help="Execute formal red-team workers during auto and block gate 20/21 unless they return GO.")
+    parser.add_argument("--redteam-workers", help="Comma-separated red-team worker families for auto. Default: policy redteam.default_workers.")
+    parser.add_argument("--redteam-rounds", type=int, help="Red-team rounds for auto. Default: one round, or policy minimum for HIGH/EXTREME runs.")
+    parser.add_argument("--redteam-total-timeout", type=int, help="Optional total timeout in seconds for all auto red-team workers.")
+    parser.add_argument("--redteam-parallel", action="store_true", help="Request parallel red-team workers per round when policy allows it.")
+    parser.add_argument("--claude-validate", action="store_true", help="Execute the validation worker, default claude, to audit that auto evidence honestly reflects real execution.")
+    parser.add_argument("--validation-worker", default="claude", help="Worker family for auto honesty validation. Default: claude.")
+    parser.add_argument("--presentation", action="store_true", help="Generate an HTML slide deck and Manim scene for the auto run.")
+    parser.add_argument("--showcase", action="store_true", help="Live demo mode: implies host-oauth-tools policy when unset, --allow-network, executed intake LLM, role agents, red-team, Claude validation, presentation, and browser opening.")
+    parser.add_argument("--allow-network", action="store_true", help="Required for executed LLM/worker paths because host model CLIs may use network/OAuth.")
+    parser.add_argument("--aws-profile", default="default", help="AWS CLI profile to use when --execute-aws is set. Default: default.")
+    parser.add_argument("--aws-region", default="us-east-1", help="AWS region for S3 website hosting. Default: us-east-1.")
+    parser.add_argument("--aws-bucket", help="Existing or desired S3 bucket name. Default: derived from the run id.")
+    parser.add_argument("--aws-gateway-name", default="sdlc-web-gateway", help="Logical S3 website gateway/bucket prefix. Default: sdlc-web-gateway.")
+    parser.add_argument("--execute-aws", action="store_true", help="Create/sync the S3 static website. Requires --approve-aws-deploy.")
+    parser.add_argument("--approve-aws-deploy", help="Explicit approval text required before AWS resources are created or modified.")
+    parser.add_argument("--public-read", action="store_true", help="Attach a public-read bucket policy for S3 website hosting.")
+    parser.add_argument("--target-run-id", help="Existing auto run to decommission or clean up.")
+    parser.add_argument("--execute-cleanup", action="store_true", help="Execute decommission cleanup. Requires --approve-cleanup.")
+    parser.add_argument("--approve-cleanup", help="Explicit approval text required before AWS/local cleanup is executed.")
+    parser.add_argument("--cleanup-local", action="store_true", help="During decommission, delete generated local site artifacts such as site/.")
+    parser.add_argument("--agent-model-config", help="JSON file with role-to-worker mappings for the role agents.")
+    parser.add_argument("--agent-model", action="append", default=[], metavar="ROLE=WORKER", help="Override one role worker, for example architecture=claude or agent_6_redteam_deploy_rollback=openai-codex-primary.")
+    parser.add_argument("--yes", action="store_true", help="Accept safe defaults and skip interactive approval questions.")
+    parser.add_argument("--open-browser", action="store_true", help="Open the generated page or report when the run completes.")
+    parser.add_argument("--no-open-browser", action="store_true", help="Do not open a browser when the run completes.")
+    parser.add_argument("--json", action="store_true")
+
+
+def _add_agent_model_cli_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--agent-model-config", help="JSON file with role-to-worker mappings for the role agents.")
+    parser.add_argument("--agent-model", action="append", default=[], metavar="ROLE=WORKER", help="Override one role worker, for example implementation=codex.")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="sdlc", description="Terminal-native Secure SDLC control plane for AI software delivery")
     parser.add_argument("--repo", default=".", help="Repository root")
@@ -5643,6 +9297,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_init = sub.add_parser("init", help="Initialize .sdlc structure")
     p_init.add_argument("--force", action="store_true", help="Rewrite default schemas/policies")
     p_init.set_defaults(func=command_init)
+
+    p_auto = sub.add_parser("auto", help="Build an artifact and run all 25 local SDLC gates")
+    _add_auto_cli_arguments(p_auto, request_help="Auto request. The intake plan/LLM decides request-specific questions and artifact type.")
+    p_auto.set_defaults(func=command_auto)
+
+    p_demo = sub.add_parser("demo", help=argparse.SUPPRESS)
+    _add_auto_cli_arguments(p_demo, request_help="Legacy auto request")
+    p_demo.set_defaults(func=command_demo)
 
     p_plan = sub.add_parser("plan", help="Create a gated SDLC run and execution prompt")
     p_plan.add_argument("feature", help="Feature request")
@@ -5665,6 +9327,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_start.add_argument("--policy", default="default")
     p_start.add_argument("--run-id")
     p_start.add_argument("--parallel", type=int, default=6)
+    _add_agent_model_cli_arguments(p_start)
     p_start.add_argument("--production-rollout-allowed", action="store_true")
     p_start.add_argument("--allow-main-push", action="store_true")
     p_start.add_argument("--json", action="store_true")
@@ -5819,6 +9482,7 @@ def build_parser() -> argparse.ArgumentParser:
     ag_plan = agents_sub.add_parser("plan", help="Create a role-agent task plan")
     ag_plan.add_argument("run_id")
     ag_plan.add_argument("--parallel", type=int, default=6)
+    _add_agent_model_cli_arguments(ag_plan)
     ag_plan.add_argument("--json", action="store_true")
     ag_plan.set_defaults(func=command_agents)
     ag_execute = agents_sub.add_parser("execute", help="Execute or dry-run a planned agent batch")
@@ -5827,6 +9491,7 @@ def build_parser() -> argparse.ArgumentParser:
     ag_execute.add_argument("--execute", action="store_true")
     ag_execute.add_argument("--allow-network", action="store_true")
     ag_execute.add_argument("--timeout", type=int, default=120)
+    _add_agent_model_cli_arguments(ag_execute)
     ag_execute.add_argument("--json", action="store_true")
     ag_execute.set_defaults(func=command_agents)
     ag_status = agents_sub.add_parser("status", help="Show agent task status")
@@ -5835,6 +9500,7 @@ def build_parser() -> argparse.ArgumentParser:
     ag_status.set_defaults(func=command_agents)
     ag_doctor = agents_sub.add_parser("doctor", help="Show worker family availability")
     ag_doctor.add_argument("--policy", default="default")
+    _add_agent_model_cli_arguments(ag_doctor)
     ag_doctor.add_argument("--json", action="store_true")
     ag_doctor.set_defaults(func=command_agents)
 

@@ -13,7 +13,7 @@ import time
 import unittest
 from unittest import mock
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -347,6 +347,16 @@ def deploy_approval_actor_proof(run_id: str, env: str, actor: str, key: str, rep
 
 
 class CoreTests(unittest.TestCase):
+    def _install_fake_worker(self, repo: Path, name: str, body: str) -> tuple[Path, str]:
+        bin_dir = repo / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        script = bin_dir / name
+        script.write_text(body, encoding="utf-8")
+        script.chmod(0o755)
+        old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = f"{bin_dir}{os.pathsep}{old_path}"
+        return script, old_path
+
     def _mark_prior_gates_go(self, store: RunStore, run_id: str, target_gate_id: str) -> None:
         plan = store.load_plan(run_id)
         target = next(gate for gate in plan.gates if gate.id == target_gate_id)
@@ -404,6 +414,572 @@ class CoreTests(unittest.TestCase):
             self.assertGreaterEqual(len(plan.gates), 25)
             self.assertTrue((store.run_dir(run_id) / "prompts" / "execution_prompt.md").exists())
             self.assertEqual(main(["--repo", str(repo), "validate", "--run-id", run_id]), 0)
+
+    def test_auto_command_creates_one_command_25_gate_website_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            run_id = "website-auto"
+            stale_site = repo / "release-readiness-site"
+            (stale_site / "evidence" / "gates").mkdir(parents=True)
+            (stale_site / "index.html").write_text(
+                "<h1>Old</h1><p>SDLC Auto Scope live-showcase-20260630-007 evidence/gates/01-intake_scope.md</p>",
+                encoding="utf-8",
+            )
+            (stale_site / "evidence" / "gates" / "01-intake_scope.md").write_text("Run: live-showcase-20260630-007\n", encoding="utf-8")
+            intake_plan = repo / "intake-plan.json"
+            intake_plan.write_text(json.dumps({
+                "schema_version": 1,
+                "kind": "website",
+                "artifact_kind": "website",
+                "build_description": {
+                    "label": "Robotics lab public site",
+                    "description": "Generate a request-specific static site from the provided intake plan.",
+                },
+                "architecture": {
+                    "label": "S3 static website gateway",
+                    "description": "Static website with evidence dashboard and planned S3 hosting.",
+                    "mermaid": "flowchart LR\n  Visitor --> Site[Robotics Lab Site]\n  Site --> Form[Accessible tour request]\n  Auto[sdlc auto] --> Evidence[25 gates]",
+                },
+                "implementation": {
+                    "artifact_kind": "website",
+                    "title": "Robotics Lab Visit Portal",
+                    "description": "A public site for lab visits, demos, and accessible tour requests.",
+                    "output_path": "site/index.html",
+                    "features": ["Demo schedule", "Visitor safety notes", "Accessible tour request"],
+                    "sections": [
+                        {"heading": "Demos", "body": "Upcoming robot demos and lab tours.", "items": ["Manipulation lab", "Autonomy bay"]},
+                        {"heading": "Visit", "body": "Plan a visit with accessibility needs captured up front.", "items": ["Step-free access", "Quiet tour slots"]},
+                        {"heading": "Readiness Overview", "body": "Summarize the current release candidate with owner and timestamp.", "items": ["Overall readiness badge", "Release candidate identifier"]},
+                        {"heading": "Audit Evidence", "body": "Show evidence links and mention rollback evidence without rendering rollback instructions.", "items": []},
+                        {"heading": "Rollback Instructions", "body": "Show rollback gate status and recovery instructions.", "items": []},
+                        {"heading": "Cleanup Plan", "body": "Cleanup S3 release prefixes, access, evidence, rollback cache, and temporary artifacts.", "items": []},
+                    ],
+                    "form": {
+                        "enabled": True,
+                        "title": "Accessible Tour Request",
+                        "fields": [
+                            {"id": "name", "label": "Name", "type": "text", "required": True},
+                            {"id": "email", "label": "Email", "type": "email", "required": True},
+                            {"id": "access_needs", "label": "Accessibility needs", "type": "textarea", "required": False},
+                        ],
+                    },
+                },
+                "questions": [
+                    {
+                        "id": "scope",
+                        "prompt": "How should this robotics site be demonstrated?",
+                        "default": 0,
+                        "options": [
+                            {"label": "Full robotics site demo", "description": "Use the complete site, form, S3 plan, and evidence dashboard.", "effects": {"aws": {"execute": False, "public_read": False}}},
+                            {"label": "Local only", "description": "No AWS plan.", "effects": {"aws": {"execute": False, "public_read": False}}},
+                        ],
+                    }
+                ],
+            }), encoding="utf-8")
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                result = main([
+                    "--repo",
+                    str(repo),
+                    "auto",
+                    "Create a public website for a robotics lab with an accessible tour request form",
+                    "--intake-plan",
+                    str(intake_plan),
+                    "--run-id",
+                    run_id,
+                    "--json",
+                ])
+            self.assertEqual(result, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["mode"], "AUTO")
+            self.assertEqual(payload["run_id"], run_id)
+            self.assertEqual(payload["gate_count"], 25)
+            self.assertFalse(payload["release_satisfied"])
+            self.assertEqual(payload["local_verdict"], "GO")
+            self.assertEqual(payload["production_authority"], "DISABLED")
+            self.assertEqual(payload["intake"]["kind"], "website")
+            self.assertEqual(payload["intake"]["llm_intake"]["source"], "provided_intake_plan")
+            self.assertFalse(payload["intake"]["interactive"])
+            self.assertEqual(payload["aws"]["status"], "PLANNED")
+            self.assertEqual(payload["aws"]["gateway_name"], "sdlc-web-gateway")
+            self.assertTrue(payload["aws"]["bucket"].startswith("sdlc-web-gateway-website-auto-"))
+            self.assertEqual(len(payload["gates"]), 25)
+            self.assertTrue(all(gate["auto_state"] == "RECORDED" for gate in payload["gates"]))
+            self.assertTrue(all(gate["local_state"] == "GO" for gate in payload["gates"]))
+            gate_ids = {gate["id"] for gate in payload["gates"]}
+            self.assertIn("ui_architecture_accessibility", gate_ids)
+            self.assertIn("deploy_rollout_postdeploy", gate_ids)
+            operation_names = {item["name"] for item in payload["operations"]}
+            self.assertTrue({
+                "intake_approvals",
+                "plan_and_prework",
+                "agent_dry_run",
+                "advisory_and_deterministic_gates",
+                "redteam_and_finding_lifecycle",
+                "git_provenance",
+                "locked_deploy_plan",
+                "implementation",
+                "aws_hosting",
+                "gate_completion",
+                "evidence_index",
+                "phase_report",
+                "html_summary",
+                "attestation_manifest",
+                "final_report",
+            }.issubset(operation_names))
+            store = RunStore(repo)
+            run_dir = store.run_dir(run_id)
+            self.assertTrue((run_dir / "artifacts" / "auto" / "summary.json").exists())
+            self.assertTrue((run_dir / "artifacts" / "auto" / "intake-approvals.md").exists())
+            self.assertTrue((run_dir / "artifacts" / "auto" / "llm-intake-prompt.md").exists())
+            self.assertTrue((run_dir / "artifacts" / "auto" / "llm-intake.json").exists())
+            self.assertTrue((run_dir / "artifacts" / "auto" / "aws-plan.json").exists())
+            self.assertTrue((run_dir / "artifacts" / "auto" / "evidence-index.md").exists())
+            html_summary = run_dir / "artifacts" / "auto" / "summary.html"
+            self.assertTrue(html_summary.exists())
+            self.assertEqual(Path(payload["artifacts"]["html_summary"]).resolve(), html_summary.resolve())
+            html_text = html_summary.read_text(encoding="utf-8")
+            self.assertIn("SDLC Auto Evidence", html_text)
+            self.assertIn("LLM Intake", html_text)
+            self.assertIn("LLM Role Activity", html_text)
+            self.assertIn("SBOM", html_text)
+            self.assertIn("gates/02-stakeholders_raci.md", html_text)
+            self.assertIn("gates/08-supply_chain_sbom.md", html_text)
+            self.assertEqual(payload["gates"][1]["evidence_artifact"], "artifacts/auto/gates/02-stakeholders_raci.md")
+            self.assertEqual(payload["gates"][7]["evidence_artifact"], "artifacts/auto/gates/08-supply_chain_sbom.md")
+            preview = run_dir / "artifacts" / "auto" / "website" / "index.html"
+            self.assertTrue(preview.exists())
+            site = repo / "site" / "index.html"
+            self.assertTrue(site.exists())
+            self.assertEqual(Path(payload["artifacts"]["implementation"]).resolve(), site.resolve())
+            self.assertEqual(payload["artifacts"]["gate_evidence_dir"], str(run_dir / "artifacts" / "auto" / "gates"))
+            preview_text = preview.read_text(encoding="utf-8")
+            self.assertIn("Robotics Lab Visit Portal", preview_text)
+            self.assertIn("Accessible Tour Request", preview_text)
+            self.assertIn("Autonomy bay", preview_text)
+            self.assertIn("01. Intake, scope, and ambiguity reduction", preview_text)
+            self.assertIn("08. Supply-chain, dependency, SBOM, and license review", preview_text)
+            self.assertIn("evidence/gates/02-stakeholders_raci.md", preview_text)
+            self.assertIn("evidence/gates/08-supply_chain_sbom.md", preview_text)
+            self.assertIn("Release candidate</h3>", preview_text)
+            self.assertIn("website-auto", preview_text)
+            self.assertIn("S3 release prefixes", preview_text)
+            cleanup_start = preview_text.index('<h2 id="cleanup-plan">Cleanup Plan</h2>')
+            cleanup_end = preview_text.index("</section>", cleanup_start)
+            cleanup_section = preview_text[cleanup_start:cleanup_end]
+            self.assertNotIn("put-bucket-policy", cleanup_section)
+            audit_start = preview_text.index('<h2 id="audit-evidence">Audit Evidence</h2>')
+            audit_end = preview_text.index("</section>", audit_start)
+            audit_section = preview_text[audit_start:audit_end]
+            self.assertIn("evidence/artifacts/01-intake_scope.md", audit_section)
+            self.assertNotIn("PREVIOUS_RUN", audit_section)
+            rollback_start = preview_text.index('<h2 id="rollback-instructions">Rollback Instructions</h2>')
+            rollback_end = preview_text.index("</section>", rollback_start)
+            rollback_section = preview_text[rollback_start:rollback_end]
+            self.assertIn("PREVIOUS_RUN", rollback_section)
+            self.assertIn("--delete", rollback_section)
+            self.assertNotIn("status-card", rollback_section)
+            self.assertNotIn("../.sdlc", preview_text)
+            self.assertNotIn("Harbor Street Cafe", preview_text)
+            self.assertEqual(site.read_text(encoding="utf-8"), preview_text)
+            public_gate = repo / "site" / "evidence" / "gates" / "08-supply_chain_sbom.md"
+            self.assertTrue(public_gate.exists())
+            public_gate_text = public_gate.read_text(encoding="utf-8")
+            self.assertIn("Current run ledger snapshot", public_gate_text)
+            self.assertIn("dependency_scope", public_gate_text)
+            self.assertIn("formal_release_state: BLOCKED", public_gate_text)
+            public_artifact = repo / "site" / "evidence" / "artifacts" / "08-supply_chain_sbom.md"
+            self.assertTrue(public_artifact.exists())
+            self.assertIn("Public-Safe Evidence Artifact", public_artifact.read_text(encoding="utf-8"))
+            public_gate_artifact = run_dir / "artifacts" / "auto" / "website" / "evidence" / "gates" / "08-supply_chain_sbom.md"
+            self.assertTrue(public_gate_artifact.exists())
+            public_evidence_artifact = run_dir / "artifacts" / "auto" / "website" / "evidence" / "artifacts" / "08-supply_chain_sbom.md"
+            self.assertTrue(public_evidence_artifact.exists())
+            link_check = read_json(run_dir / "artifacts" / "auto" / "website" / "link-check.json", {})
+            self.assertEqual(link_check["status"], "GO")
+            self.assertEqual(link_check["checked"], 50)
+            self.assertEqual(link_check["missing"], [])
+            stale_scan = read_json(run_dir / "artifacts" / "auto" / "stale-site-scan.json", {})
+            self.assertEqual(len(stale_scan["quarantined"]), 1)
+            self.assertFalse(stale_site.exists())
+            self.assertTrue((run_dir / "artifacts" / "auto" / "quarantined-sites" / "release-readiness-site" / "index.html").exists())
+            phase_report = run_dir / "artifacts" / "auto" / "25-phase-report.md"
+            self.assertTrue(phase_report.exists())
+            phase_text = phase_report.read_text(encoding="utf-8")
+            self.assertIn("Gate Work Detail", phase_text)
+            self.assertIn("Proof artifact: `artifacts/auto/gates/02-stakeholders_raci.md`", phase_text)
+            self.assertTrue((run_dir / "final-report.md").exists())
+            self.assertTrue((run_dir / "artifacts" / "release" / "readiness.json").exists())
+            self.assertTrue((run_dir / "artifacts" / "attestations" / "manifest.json").exists())
+
+    def test_auto_fails_fast_when_requested_intake_llm_is_policy_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                result = main([
+                    "--repo",
+                    str(repo),
+                    "auto",
+                    "Build a status website with gate cards",
+                    "--execute-intake-llm",
+                    "--intake-model",
+                    "codex",
+                    "--allow-network",
+                    "--run-id",
+                    "blocked-intake",
+                    "--json",
+                ])
+            self.assertEqual(result, 2)
+            self.assertIn("Intake LLM execution was requested", stderr.getvalue())
+            self.assertIn("network_allowed=true", stderr.getvalue())
+            self.assertFalse((repo / ".sdlc" / "runs" / "blocked-intake").exists())
+            self.assertEqual(stdout.getvalue(), "")
+
+    def test_auto_extracts_json_from_worker_transport_jsonl(self) -> None:
+        wrapped = "\n".join([
+            json.dumps({"type": "turn.started"}),
+            json.dumps({"type": "message", "content": [{"type": "text", "text": "```json\n{\"kind\":\"website\",\"artifact_kind\":\"website\",\"questions\":[]}\n```"}]}),
+            json.dumps({"type": "turn.completed"}),
+        ])
+        payload = cli_module._extract_json_object(wrapped)
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertEqual(payload["kind"], "website")
+        self.assertEqual(payload["artifact_kind"], "website")
+
+    def test_auto_cleanup_plan_phrase_does_not_force_decommission(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                result = main([
+                    "--repo",
+                    str(repo),
+                    "auto",
+                    "Build a public release-readiness status website with gate cards, rollback instructions, and cleanup plan",
+                    "--run-id",
+                    "status-website",
+                    "--json",
+                ])
+            self.assertEqual(result, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["intake"]["artifact_kind"], "website")
+            self.assertEqual(payload["aws"]["status"], "PLANNED")
+            self.assertIn("aws_hosting", {item["name"] for item in payload["operations"]})
+            self.assertNotIn("environment_decommission", {item["name"] for item in payload["operations"]})
+            self.assertTrue((repo / "site" / "index.html").exists())
+
+    def test_auto_decommission_plans_cleanup_for_prior_website_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                self.assertEqual(main([
+                    "--repo",
+                    str(repo),
+                    "auto",
+                    "Create a web site for a local bakery with an accessible contact form",
+                    "--run-id",
+                    "website-auto",
+                    "--json",
+                ]), 0)
+            website_payload = json.loads(stdout.getvalue())
+            cleanup_stdout = io.StringIO()
+            with redirect_stdout(cleanup_stdout):
+                result = main([
+                    "--repo",
+                    str(repo),
+                    "auto",
+                    "decommission",
+                    "prod",
+                    "website",
+                    "--run-id",
+                    "cleanup-auto",
+                    "--target-run-id",
+                    "website-auto",
+                    "--json",
+                ])
+            self.assertEqual(result, 0)
+            payload = json.loads(cleanup_stdout.getvalue())
+            self.assertEqual(payload["intake"]["kind"], "decommission")
+            self.assertEqual(payload["aws"]["status"], "PLANNED")
+            self.assertEqual(payload["aws"]["bucket"], website_payload["aws"]["bucket"])
+            self.assertEqual(payload["aws"]["target_run_id"], "website-auto")
+            self.assertEqual(payload["aws"]["commands"][0][:3], ["aws", "s3", "rb"])
+            operation_names = {item["name"] for item in payload["operations"]}
+            self.assertIn("environment_decommission", operation_names)
+            run_dir = RunStore(repo).run_dir("cleanup-auto")
+            cleanup_plan = run_dir / "artifacts" / "auto" / "decommission-plan.json"
+            self.assertTrue(cleanup_plan.exists())
+            self.assertTrue((run_dir / "artifacts" / "auto" / "summary.html").exists())
+            deploy_gate = run_dir / "artifacts" / "auto" / "gates" / "24-deploy_rollout_postdeploy.md"
+            self.assertIn("deployment/cleanup evidence", deploy_gate.read_text(encoding="utf-8"))
+
+    def test_auto_command_creates_fibonacci_script_with_25_gate_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            run_id = "fibonacci-auto"
+            intake_plan = repo / "fibonacci-intake.json"
+            fibonacci_source = "\n".join([
+                "#!/usr/bin/env python3",
+                "from __future__ import annotations",
+                "",
+                "import argparse",
+                "",
+                "",
+                "def fibonacci(count: int) -> list[int]:",
+                "    values: list[int] = []",
+                "    a, b = 0, 1",
+                "    for _ in range(count):",
+                "        values.append(a)",
+                "        a, b = b, a + b",
+                "    return values",
+                "",
+                "",
+                "def main(argv: list[str] | None = None) -> int:",
+                "    parser = argparse.ArgumentParser(description='Print a Fibonacci series.')",
+                "    parser.add_argument('count', nargs='?', type=int, default=10)",
+                "    args = parser.parse_args(argv)",
+                "    print(' '.join(str(value) for value in fibonacci(args.count)))",
+                "    return 0",
+                "",
+                "",
+                "if __name__ == '__main__':",
+                "    raise SystemExit(main())",
+            ]) + "\n"
+            intake_plan.write_text(json.dumps({
+                "schema_version": 1,
+                "kind": "python_cli",
+                "artifact_kind": "python_script",
+                "build_description": {"label": "Fibonacci CLI", "description": "Generate a Python CLI from model-supplied source."},
+                "architecture": {
+                    "label": "Local Python CLI",
+                    "description": "Generated script plus local execution transcript.",
+                    "mermaid": "flowchart LR\n  Auto[sdlc auto] --> Script[fibonacci.py]\n  Script --> Transcript[demo output]",
+                },
+                "implementation": {
+                    "artifact_kind": "python_script",
+                    "title": "Fibonacci CLI",
+                    "description": "Print a Fibonacci sequence.",
+                    "output_path": "fibonacci.py",
+                    "python_source": fibonacci_source,
+                    "demo_args": ["10"],
+                },
+                "questions": [
+                    {
+                        "id": "scope",
+                        "prompt": "How should the script be demonstrated?",
+                        "default": 0,
+                        "options": [
+                            {"label": "Full CLI demo", "description": "Generate, execute, and record all gate evidence.", "effects": {}},
+                            {"label": "Generate only", "description": "Skip execution.", "effects": {"implementation": {"demo_args": []}}},
+                        ],
+                    }
+                ],
+            }), encoding="utf-8")
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                result = main([
+                    "--repo",
+                    str(repo),
+                    "auto",
+                    "Generate a simple fibonacci series script",
+                    "--intake-plan",
+                    str(intake_plan),
+                    "--run-id",
+                    run_id,
+                    "--json",
+                ])
+            self.assertEqual(result, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["intake"]["kind"], "python_cli")
+            self.assertEqual(payload["intake"]["artifact_kind"], "python_script")
+            self.assertEqual(payload["risk_level"], "LOW")
+            self.assertEqual(payload["aws"]["status"], "NOT_APPLICABLE")
+            self.assertEqual(payload["local_verdict"], "GO")
+            self.assertEqual(len(payload["gates"]), 25)
+            self.assertTrue(all(gate["local_state"] == "GO" for gate in payload["gates"]))
+            gate_artifacts = {gate["id"]: gate["evidence_artifact"] for gate in payload["gates"]}
+            self.assertEqual(gate_artifacts["stakeholders_raci"], "artifacts/auto/gates/02-stakeholders_raci.md")
+            self.assertEqual(gate_artifacts["supply_chain_sbom"], "artifacts/auto/gates/08-supply_chain_sbom.md")
+            run_dir = RunStore(repo).run_dir(run_id)
+            script = repo / "fibonacci.py"
+            self.assertTrue(script.exists())
+            self.assertIn("def fibonacci", script.read_text(encoding="utf-8"))
+            demo_output = run_dir / "artifacts" / "auto" / "implementation" / "demo-output.md"
+            self.assertTrue(demo_output.exists())
+            self.assertIn("0 1 1 2 3 5 8 13 21 34", demo_output.read_text(encoding="utf-8"))
+            evidence_index = run_dir / "artifacts" / "auto" / "evidence-index.md"
+            self.assertTrue(evidence_index.exists())
+            index_text = evidence_index.read_text(encoding="utf-8")
+            self.assertIn("02 | `stakeholders_raci`", index_text)
+            self.assertIn("08 | `supply_chain_sbom`", index_text)
+            self.assertIn("Supply-chain note", (run_dir / gate_artifacts["supply_chain_sbom"]).read_text(encoding="utf-8"))
+
+    def test_auto_showcase_executes_workers_redteam_validation_logs_and_presentation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            run_id = "showcase-auto"
+            intake_payload = json.dumps({
+                "schema_version": 1,
+                "kind": "website",
+                "artifact_kind": "website",
+                "build_description": {"label": "Release status site", "description": "A compact evidence-heavy status website."},
+                "architecture": {
+                    "label": "Static evidence site",
+                    "description": "Generated site plus SDLC proof dashboard.",
+                    "mermaid": "flowchart LR\n  User --> Site\n  Site --> Evidence",
+                },
+                "implementation": {
+                    "artifact_kind": "website",
+                    "title": "Release Readiness Control Plane",
+                    "description": "Status website with evidence links.",
+                    "output_path": "site/index.html",
+                    "features": ["Gate status cards", "Audit evidence links", "Incident banner"],
+                    "sections": [{"heading": "Gate Status", "body": "All gates carry evidence.", "items": ["Architecture", "QA", "Red-team"]}],
+                    "form": {"enabled": True, "title": "Accessible Incident Contact", "fields": [{"id": "email", "label": "Email", "type": "email", "required": True}]},
+                },
+                "questions": [],
+                "open_browser": False,
+            })
+            role_payload = json.dumps({"status": "GO", "evidence": "role worker executed"})
+            redteam_payload = json.dumps({"verdict": "GO", "findings": [], "reasons": ["No blocking issues in generated demo scope."]})
+            codex_body = "\n".join([
+                "#!/bin/sh",
+                "input=$(cat)",
+                "case \"$input\" in",
+                f"*\"SDLC Auto Intake Planner\"*) printf '%s\\n' {shlex.quote(intake_payload)} ;;",
+                f"*\"SDLC Role Agent Task\"*) printf '%s\\n' {shlex.quote(role_payload)} ;;",
+                f"*) printf '%s\\n' {shlex.quote(redteam_payload)} ;;",
+                "esac",
+            ]) + "\n"
+            claude_payload = json.dumps({
+                "verdict": "GO",
+                "reasons": ["Executed worker evidence, red-team summary, and all gate proof paths are present."],
+                "checked_gates": 25,
+                "real_worker_execution": True,
+                "honesty_notes": ["No dry-run execution was labeled as live execution."],
+            })
+            claude_body = f"#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' {shlex.quote(claude_payload)}\n"
+            _codex, old_path = self._install_fake_worker(repo, "codex", codex_body)
+            self._install_fake_worker(repo, "claude", claude_body)
+            stdout = io.StringIO()
+            try:
+                with redirect_stdout(stdout):
+                    result = main([
+                        "--repo",
+                        str(repo),
+                        "auto",
+                        "Build a compact release status website with evidence links",
+                        "--showcase",
+                        "--risk",
+                        "medium",
+                        "--redteam-rounds",
+                        "1",
+                        "--run-id",
+                        run_id,
+                        "--json",
+                        "--no-open-browser",
+                    ])
+            finally:
+                os.environ["PATH"] = old_path
+            self.assertEqual(result, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["intake"]["llm_intake"]["source"], "executed_llm")
+            self.assertEqual(payload["intake"]["llm_intake"]["status"], "EXECUTED")
+            self.assertTrue(payload["agent_execution_requested"])
+            self.assertTrue(payload["redteam_execution_requested"])
+            self.assertEqual(payload["redteam_execution"]["verdict"], "GO")
+            self.assertEqual(payload["validation"]["status"], "GO")
+            self.assertTrue(payload["aws"]["public_read"])
+            self.assertEqual(payload["aws"]["public_access_model"], "s3_website_bucket_policy")
+            flattened_commands = " ".join(" ".join(command) for command in payload["aws"]["commands"])
+            self.assertIn("put-bucket-policy", flattened_commands)
+            self.assertIn("evidence/gates/01-intake_scope.md", flattened_commands)
+            flattened_rollback = " ".join(" ".join(command) for command in payload["aws"]["rollback_commands"])
+            self.assertIn("--delete", flattened_rollback)
+            self.assertIn("releases/PREVIOUS_RUN/", flattened_rollback)
+            operation_names = {item["name"] for item in payload["operations"]}
+            self.assertIn("agent_execution", operation_names)
+            self.assertIn("brutal_redteam_execution", operation_names)
+            self.assertIn("claude_honesty_validation", operation_names)
+            self.assertIn("execution_log", operation_names)
+            self.assertIn("presentation", operation_names)
+            self.assertTrue(all(gate["local_state"] == "GO" for gate in payload["gates"]))
+            run_dir = RunStore(repo).run_dir(run_id)
+            self.assertTrue(Path(payload["artifacts"]["execution_log"]).exists())
+            self.assertTrue(Path(payload["artifacts"]["presentation"]).exists())
+            self.assertTrue(Path(payload["artifacts"]["presentation_manim"]).exists())
+            self.assertTrue(Path(payload["artifacts"]["validation"]).exists())
+            agent_plan = read_json(run_dir / "artifacts" / "agents" / "task-plan.json", {})
+            executed_tasks = [
+                task for task in agent_plan.get("tasks", [])
+                if isinstance(task, dict)
+                and isinstance(task.get("worker_result"), dict)
+                and task["worker_result"].get("executed") is True
+            ]
+            self.assertTrue(executed_tasks)
+            summary_html = (run_dir / "artifacts" / "auto" / "summary.html").read_text(encoding="utf-8")
+            self.assertIn("Showcase Proof", summary_html)
+            self.assertIn("Presentation", summary_html)
+            deck = Path(payload["artifacts"]["presentation"]).read_text(encoding="utf-8")
+            self.assertIn("25 Gates", deck)
+            site = (repo / "site" / "index.html").read_text(encoding="utf-8")
+            self.assertIn("evidence/gates/20-independent_redteam_cross_model.md", site)
+            self.assertNotIn("../.sdlc", site)
+            self.assertTrue((repo / "site" / "evidence" / "gates" / "20-independent_redteam_cross_model.md").exists())
+
+    def test_auto_claude_validation_no_go_blocks_final_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            run_id = "validation-blocks"
+            role_payload = json.dumps({"status": "GO", "evidence": "role worker executed"})
+            redteam_payload = json.dumps({"verdict": "GO", "findings": []})
+            codex_body = "\n".join([
+                "#!/bin/sh",
+                "input=$(cat)",
+                "case \"$input\" in",
+                f"*\"SDLC Role Agent Task\"*) printf '%s\\n' {shlex.quote(role_payload)} ;;",
+                f"*) printf '%s\\n' {shlex.quote(redteam_payload)} ;;",
+                "esac",
+            ]) + "\n"
+            claude_payload = json.dumps({"verdict": "NO_GO", "reasons": ["Validation deliberately failed."]})
+            claude_body = f"#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' {shlex.quote(claude_payload)}\n"
+            _codex, old_path = self._install_fake_worker(repo, "codex", codex_body)
+            self._install_fake_worker(repo, "claude", claude_body)
+            stdout = io.StringIO()
+            try:
+                with redirect_stdout(stdout):
+                    result = main([
+                        "--repo",
+                        str(repo),
+                        "auto",
+                        "Build a compact status website",
+                        "--policy",
+                        "host-oauth-tools",
+                        "--allow-network",
+                        "--execute-agents",
+                        "--execute-redteam",
+                        "--redteam-rounds",
+                        "1",
+                        "--claude-validate",
+                        "--risk",
+                        "medium",
+                        "--run-id",
+                        run_id,
+                        "--json",
+                    ])
+            finally:
+                os.environ["PATH"] = old_path
+            self.assertEqual(result, 3)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["validation"]["status"], "NO_GO")
+            final_gate = next(gate for gate in payload["gates"] if gate["id"] == "final_report_reaudit")
+            self.assertEqual(final_gate["local_state"], "NO_GO")
+            gate_completion = next(item for item in payload["operations"] if item["name"] == "gate_completion")
+            self.assertEqual(gate_completion["status"], "NO_GO")
 
     def test_prompt_run_required_outputs_include_source_files(self) -> None:
         prompt = """
@@ -908,6 +1484,55 @@ Optional:
             self.assertTrue(
                 any(task["agent_id"] == "agent_8_cybersecurity_engineer" and task["mode"] == "SECURITY_REVIEW" for task in task_plan["tasks"])
             )
+
+    def test_agents_plan_accepts_model_config_and_cli_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            run_id = "agents-models"
+            self.assertEqual(main(["--repo", str(repo), "plan", "Build CLI helper", "--run-id", run_id]), 0)
+            config = repo / "agent-models.json"
+            config.write_text(
+                json.dumps({
+                    "role_worker_preferences": {
+                        "architecture": "gemini",
+                        "implementation": "claude",
+                    },
+                    "worker_families": {
+                        "local-review": {
+                            "command": ["local-reviewer"],
+                            "provider": "local",
+                        }
+                    },
+                }),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                main([
+                    "--repo",
+                    str(repo),
+                    "agents",
+                    "plan",
+                    run_id,
+                    "--agent-model-config",
+                    str(config),
+                    "--agent-model",
+                    "implementation=codex",
+                    "--agent-model",
+                    "qa=claude",
+                    "--json",
+                ]),
+                0,
+            )
+            task_plan = read_json(repo / ".sdlc" / "runs" / run_id / "artifacts" / "agents" / "task-plan.json")
+            tasks = {task["agent_id"]: task for task in task_plan["tasks"]}
+            self.assertEqual(tasks["agent_2_architecture_contracts"]["worker_family"], "gemini")
+            self.assertEqual(tasks["agent_3_implementation_owner"]["worker_family"], "codex")
+            self.assertEqual(tasks["agent_5_qa_validation_owner"]["worker_family"], "claude")
+            selection = task_plan["role_model_selection"]
+            self.assertEqual(selection["configured_preferences"]["agent_2_architecture_contracts"], ["gemini"])
+            self.assertEqual(selection["configured_preferences"]["agent_3_implementation_owner"], ["codex"])
+            self.assertEqual(selection["override_source"]["config"], str(config))
+            self.assertIn("implementation=codex", selection["override_source"]["cli"])
 
     def test_agents_execute_invokes_workers_only_with_execute(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
