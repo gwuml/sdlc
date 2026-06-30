@@ -96,6 +96,46 @@ python -m sdlc validate --run-id <run-id> --release
 # 1. Initialize the repo
 python -m sdlc init
 
+# One-command auto run: approve scope, create an artifact, and record all 25 gates
+python -m sdlc auto "Create a web site for a local bakery with an accessible contact form"
+
+# The same auto path is generic; the intake plan/LLM decides the artifact type
+python -m sdlc auto "Generate a simple fibonacci series script"
+
+# Let a selected worker/LLM generate the request interpretation and questions
+# Requires a policy with network_allowed=true plus explicit network approval.
+python -m sdlc auto "Build a small incident status tool" \
+  --policy host-oauth-tools \
+  --execute-intake-llm \
+  --intake-model codex \
+  --allow-network
+
+# Live showcase mode: executed intake LLM, role agents, formal red-team,
+# Claude honesty validation, execution log, HTML dashboard, and presentation.
+# AWS hosting still needs the explicit AWS approval flags shown below.
+python -m sdlc auto \
+  "Build a public release-readiness status website with gate status cards, audit evidence links, accessible incident banner, S3 hosting plan, rollback instructions, and cleanup plan" \
+  --showcase
+
+# Or provide a precomputed LLM intake plan JSON for fully deterministic runs
+python -m sdlc auto "Build a small incident status tool" \
+  --intake-plan .sdlc/intake-plans/status-tool.json
+
+# Execute AWS S3 hosting only after explicit approval
+python -m sdlc auto "Create a web site for a local bakery with an accessible contact form" \
+  --execute-aws \
+  --approve-aws-deploy "host this generated static website in AWS using the default profile" \
+  --public-read
+
+# Decommission a previously generated website environment; plan-only by default
+python -m sdlc auto decommission prod website --target-run-id <run-id>
+
+# Execute cleanup only after explicit approval
+python -m sdlc auto decommission prod website \
+  --target-run-id <run-id> \
+  --execute-cleanup \
+  --approve-cleanup "approved: decommission AWS static website resources for this sdlc auto run"
+
 # 2. Create a gated SDLC run
 python -m sdlc plan "Build multi-tenant RBAC dashboard with audit logs" \
   --risk auto \
@@ -116,6 +156,15 @@ python -m sdlc scan <run-id>
 python -m sdlc worker <run-id> codex --mode BUILD
 python -m sdlc worker <run-id> claude --mode PLAN
 
+# Optional: choose which worker/LLM family plays each role
+python -m sdlc agents plan <run-id> \
+  --agent-model architecture=claude \
+  --agent-model implementation=codex \
+  --agent-model redteam=openai-codex-primary
+
+python -m sdlc auto "Create a web site for a local cafe" \
+  --agent-model-config .sdlc/agent-models.json
+
 # 7. Generate report
 python -m sdlc report <run-id> --print
 
@@ -127,6 +176,48 @@ python -m sdlc git provenance <run-id>
 python -m sdlc validate --run-id <run-id> --release
 ```
 
+`sdlc auto` first creates, executes, or loads a structured intake plan. That
+plan supplies the request interpretation, Mermaid architecture, approval
+questions/options, default choices, artifact kind, generated content, and cloud
+or cleanup posture. Interactive questions are rendered from the plan's
+`questions[]`; the CLI no longer has request-specific option branches for cafe
+sites, Fibonacci scripts, trading systems, or other domains. If no executed
+worker or `--intake-plan` is provided, the command records a
+`schema_fallback` intake and makes that fallback visible in the evidence.
+If `--execute-intake-llm` is requested and the worker is blocked or does not
+return a valid plan, `sdlc auto` fails before creating a run instead of silently
+falling back.
+
+`--showcase` is the one-switch live demo path. It uses `host-oauth-tools` when
+no policy is supplied, enables network worker execution, runs the intake LLM,
+role-agent workers, formal red-team workers, Claude honesty validation,
+execution-log capture, presentation generation, and browser opening. It does
+not silently create AWS resources or perform destructive cleanup; use the
+existing `--execute-aws ... --approve-aws-deploy ...` and `--execute-cleanup
+... --approve-cleanup ...` flags for those mutations.
+
+The richest end-to-end demonstration should be the first/default option in the
+intake plan. `sdlc auto` writes the prompt at
+`.sdlc/runs/<run-id>/artifacts/auto/llm-intake-prompt.md` and the model/provided
+intake result at `.sdlc/runs/<run-id>/artifacts/auto/llm-intake.json`.
+
+`sdlc auto` writes a proof artifact for every gate under
+`.sdlc/runs/<run-id>/artifacts/auto/gates/` and an auditor-friendly index at
+`.sdlc/runs/<run-id>/artifacts/auto/evidence-index.md`. It also writes a
+browsable HTML dashboard at `.sdlc/runs/<run-id>/artifacts/auto/summary.html`
+with links to all gate reports, intake prompt/result, and role-agent/LLM
+activity. For example, `stakeholders_raci` lands at
+`artifacts/auto/gates/02-stakeholders_raci.md`, and `supply_chain_sbom` lands at
+`artifacts/auto/gates/08-supply_chain_sbom.md`.
+Showcase runs also write `artifacts/auto/execution-log.md`,
+`artifacts/auto/execution-events.json`,
+`artifacts/auto/validation/claude-validation.json`, and
+`artifacts/auto/presentation/index.html` plus a Manim scene file.
+
+Website auto runs use an AWS S3 static website plan by default with the logical
+gateway/bucket prefix `sdlc-web-gateway`. Override it with
+`--aws-gateway-name <name>` or provide an exact bucket with `--aws-bucket`.
+
 Every completed run must now record branch housekeeping. If policy and human
 approval allow direct `main` integration, the run should merge or fast-forward
 the approved work into `main`, push `origin/main`, and delete only the SDLC
@@ -136,6 +227,26 @@ exact merge, PR, and cleanup commands still required. Do not merge stale,
 failed, unrelated, or abandoned branches as part of housekeeping.
 
 By default, worker commands are **dry-run only**. Use `--execute` explicitly if you want the adapter to call Codex or Claude.
+For `sdlc auto`, `--agent-model role=worker` only chooses which worker family is
+assigned to a role. Add `--execute-agents --allow-network --policy
+host-oauth-tools` when you want those role workers to actually run during the
+auto command.
+Role-agent model selection can live in `.sdlc/policies/<profile>.json` under
+`agents.role_worker_preferences`, in a run-specific JSON file passed with
+`--agent-model-config`, or in repeatable `--agent-model role=worker` CLI
+overrides. CLI overrides win over the config file. Example:
+
+```json
+{
+  "role_worker_preferences": {
+    "architecture": "claude",
+    "implementation": "codex",
+    "qa": "codex",
+    "redteam": "openai-codex-primary"
+  }
+}
+```
+
 For HIGH/EXTREME executed prompt runs, SDLC now runs a release preflight before
 calling the worker. The preflight blocks recurring late failures early: dirty
 worktrees, protected branches, missing attestation/actor-proof keys, scanner
@@ -362,4 +473,3 @@ The control plane is local-first and transmits nothing off-machine by default. F
 exactly what data is handled, what leaves the machine only with explicit consent, how
 consent is recorded and revoked, and what the local memory store retains, see
 [privacy.md](privacy.md).
-

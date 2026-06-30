@@ -336,6 +336,10 @@ HIGH_STAKES_TERMS = {
 UI_TERMS = {
     "ui",
     "ux",
+    "web",
+    "web site",
+    "website",
+    "landing page",
     "dashboard",
     "screen",
     "page",

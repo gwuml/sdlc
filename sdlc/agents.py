@@ -71,6 +71,7 @@ def plan_agents(plan: RunPlan, policy: dict[str, Any], *, requested_parallelism:
         "requested_parallelism": requested_parallelism,
         "effective_parallelism": effective_parallelism,
         "execute_default": "DRY_RUN",
+        "role_model_selection": _role_model_selection(policy, tasks),
         "tasks": tasks,
         "batches": batches,
         "write_scope_contract": _write_scope_contract(tasks, policy),
@@ -325,6 +326,24 @@ def _write_scope_contract(tasks: list[dict[str, Any]], policy: dict[str, Any]) -
     }
 
 
+def _role_model_selection(policy: dict[str, Any], tasks: list[dict[str, Any]]) -> dict[str, Any]:
+    agent_policy = policy.get("agents", {}) if isinstance(policy.get("agents"), dict) else {}
+    configured = agent_policy.get("role_worker_preferences", {}) if isinstance(agent_policy.get("role_worker_preferences"), dict) else {}
+    metadata = policy.get("_agent_model_selection", {}) if isinstance(policy.get("_agent_model_selection"), dict) else {}
+    return {
+        "configured_preferences": configured,
+        "override_source": metadata,
+        "assignments": {
+            str(task.get("agent_id")): {
+                "worker_family": task.get("worker_family"),
+                "mode": task.get("mode"),
+                "worker_available": task.get("worker_available"),
+            }
+            for task in tasks
+        },
+    }
+
+
 def _path_scope_overlap(left: str, right: str) -> bool:
     if left == right:
         return True
@@ -364,6 +383,8 @@ def _preferred_worker(agent_id: str, default: str, policy: dict[str, Any]) -> st
     preferred = role_preferences.get(agent_id)
     if isinstance(preferred, list) and preferred:
         return str(preferred[0])
+    if isinstance(preferred, str) and preferred.strip():
+        return preferred.strip()
     workers = policy.get("workers", {})
     if isinstance(workers, dict):
         role_key = {
