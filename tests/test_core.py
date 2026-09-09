@@ -535,6 +535,8 @@ class CoreTests(unittest.TestCase):
             self.assertTrue((run_dir / "artifacts" / "auto" / "llm-intake.json").exists())
             self.assertTrue((run_dir / "artifacts" / "auto" / "aws-plan.json").exists())
             self.assertTrue((run_dir / "artifacts" / "auto" / "evidence-index.md").exists())
+            self.assertTrue((run_dir / "artifacts" / "auto" / "artifact-quality-report.md").exists())
+            self.assertTrue((run_dir / "artifacts" / "auto" / "artifact-redteam-review.md").exists())
             html_summary = run_dir / "artifacts" / "auto" / "summary.html"
             self.assertTrue(html_summary.exists())
             self.assertEqual(Path(payload["artifacts"]["html_summary"]).resolve(), html_summary.resolve())
@@ -543,10 +545,36 @@ class CoreTests(unittest.TestCase):
             self.assertIn("LLM Intake", html_text)
             self.assertIn("LLM Role Activity", html_text)
             self.assertIn("SBOM", html_text)
+            self.assertIn("Artifact Quality", html_text)
+            self.assertIn("Typed evidence", html_text)
             self.assertIn("gates/02-stakeholders_raci.md", html_text)
             self.assertIn("gates/08-supply_chain_sbom.md", html_text)
             self.assertEqual(payload["gates"][1]["evidence_artifact"], "artifacts/auto/gates/02-stakeholders_raci.md")
             self.assertEqual(payload["gates"][7]["evidence_artifact"], "artifacts/auto/gates/08-supply_chain_sbom.md")
+            self.assertEqual(payload["artifacts"]["gate_documents_dir"], str(run_dir / "artifacts" / "auto" / "gate-docs"))
+            raci_dir = run_dir / "artifacts" / "auto" / "gate-docs" / "02-stakeholders_raci"
+            raci_doc = raci_dir / "raci_matrix.md"
+            raci_json = raci_dir / "raci-matrix.json"
+            self.assertTrue(raci_doc.exists())
+            self.assertTrue(raci_json.exists())
+            self.assertIn("responsible/accountable/consulted/informed", raci_doc.read_text(encoding="utf-8"))
+            raci_payload = read_json(raci_json, {})
+            self.assertTrue(raci_payload.get("decisions"))
+            self.assertTrue(all(item.get("responsible") and item.get("accountable") for item in raci_payload["decisions"]))
+            sbom_dir = run_dir / "artifacts" / "auto" / "gate-docs" / "08-supply_chain_sbom"
+            sbom_doc = sbom_dir / "sbom_or_sbom_plan.md"
+            sbom_json = sbom_dir / "sbom.cdx.json"
+            self.assertTrue(sbom_doc.exists())
+            self.assertTrue(sbom_json.exists())
+            sbom_payload = read_json(sbom_json, {})
+            self.assertEqual(sbom_payload["bomFormat"], "CycloneDX")
+            self.assertTrue(sbom_payload["metadata"]["component"]["hashes"])
+            typed_raci = run_dir / "artifacts" / "gates" / "stakeholders_raci-evidence.json"
+            typed_sbom = run_dir / "artifacts" / "gates" / "supply_chain_sbom-evidence.json"
+            self.assertTrue(typed_raci.exists())
+            self.assertTrue(typed_sbom.exists())
+            self.assertIn("artifact_bindings", read_json(typed_raci, {}))
+            self.assertIn("artifact_bindings", read_json(typed_sbom, {}))
             preview = run_dir / "artifacts" / "auto" / "website" / "index.html"
             self.assertTrue(preview.exists())
             site = repo / "site" / "index.html"
@@ -816,7 +844,12 @@ class CoreTests(unittest.TestCase):
             index_text = evidence_index.read_text(encoding="utf-8")
             self.assertIn("02 | `stakeholders_raci`", index_text)
             self.assertIn("08 | `supply_chain_sbom`", index_text)
+            self.assertIn("Required docs", index_text)
+            self.assertIn("artifacts/gates/stakeholders_raci-evidence.json", index_text)
             self.assertIn("Supply-chain note", (run_dir / gate_artifacts["supply_chain_sbom"]).read_text(encoding="utf-8"))
+            sbom_json = run_dir / "artifacts" / "auto" / "gate-docs" / "08-supply_chain_sbom" / "sbom.cdx.json"
+            self.assertEqual(read_json(sbom_json, {})["bomFormat"], "CycloneDX")
+            self.assertTrue((run_dir / "artifacts" / "gates" / "supply_chain_sbom-evidence.json").exists())
 
     def test_auto_showcase_executes_workers_redteam_validation_logs_and_presentation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
